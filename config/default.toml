@@ -1,0 +1,47 @@
+# ROOMBACALYPSE default configuration.
+#
+# These values mirror the defaults in roombacalypse/core/config.py, and
+# tests/test_config.py fails if the two drift apart. To experiment, copy this
+# file and pass it with `--config my.toml` (only the keys you change are
+# needed), or override single values with `--set section.key=value`.
+#
+# Units: SI (m, s, rad, W, J) unless a key ends in _deg.
+
+room = "studio"            # built-in room (config/rooms/<name>.toml) or a path
+
+[simulation]
+dt = 0.02                  # physics timestep [s] (50 Hz)
+seed = 42                  # root seed for every random stream
+control_period = 0.1       # robot software update period [s] (10 Hz); multiple of dt
+
+[robot]                    # nominal "spec sheet", known to the robot's software
+radius = 0.17              # body radius [m]
+height = 0.092             # body height [m]: drives under anything higher
+wheel_base = 0.235         # distance between drive wheels [m]
+wheel_radius = 0.036       # drive wheel radius [m]
+max_wheel_speed = 0.5      # per-wheel surface speed limit [m/s]
+max_wheel_accel = 1.0      # per-wheel acceleration limit [m/s^2]
+
+[dock]
+width = 0.32               # along the wall [m]
+depth = 0.10               # into the room [m]
+height = 0.10              # [m]
+gap = 0.005                # clearance between docked robot and dock face [m]
+
+[physics]
+contact_skin = 0.001       # bodies closer than this count as touching [m]
+max_solver_iterations = 8  # penetration-resolution passes per step
+
+[teleop]
+linear_speed = 0.3         # arrow-key driving speed [m/s]
+boost_linear_speed = 0.5   # with Shift held [m/s]
+angular_speed = 2.0        # turn rate [rad/s]
+
+[viewer]
+width = 1280               # window size [px]
+height = 800
+panel_width = 340          # status panel on the right [px]
+fps = 60
+speed_factor = 1.0         # initial simulation speed (x real time)
+max_steps_per_frame = 400  # physics steps per frame before dropping time
+trail_seconds = 60.0       # length of the ground-truth trail [s]

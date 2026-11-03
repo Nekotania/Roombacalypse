@@ -1,0 +1,26 @@
+# Test Chamber: a small, nearly empty box for quick experiments.
+
+[room]
+name = "Test Chamber"
+description = "4 x 3 m box with one pillar and one pushable crate."
+outline = [[0.0, 0.0], [4.0, 0.0], [4.0, 3.0], [0.0, 3.0]]
+
+[dock]
+position = [0.0, 1.5]
+facing_deg = 0.0
+
+[[obstacles]]
+name = "pillar"
+kind = "pillar"
+shape = "circle"
+center = [2.6, 1.5]
+radius = 0.15
+z = [0.0, 2.5]
+
+[[obstacles]]
+name = "crate"
+kind = "box"
+center = [2.6, 0.6]
+size = [0.4, 0.3]
+z = [0.0, 0.35]
+mobility = 0.7

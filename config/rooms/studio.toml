@@ -1,0 +1,167 @@
+# Studio Apartment: the default room.
+#
+# Coordinates in metres, x to the right, y up, origin at the bottom-left
+# corner. Obstacles occupy a vertical band z = [z_min, z_max]:
+#   * the robot body (0 to 0.092 m) collides only with obstacles below 0.092 m,
+#     so it drives under the bed and table tops but not into their legs;
+#   * the LiDAR (milestone 2) scans at 0.095 m, so the sock and the dog bowl
+#     below that plane are invisible to it and have to be found by bumping.
+#
+# Shapes: box (center, size, angle_deg), circle (center, radius), polygon
+# (vertices, convex), plus the macros table (legs + top) and chair
+# (legs + seat + backrest). mobility in [0, 1]: 0 = fixed, 1 = moves freely
+# when pushed.
+
+[room]
+name = "Studio Apartment"
+description = "L-shaped studio: bed, living corner, dining set, kitchen, and a sock."
+# Floor outline, counter-clockwise. The top-right notch is the bathroom (off limits).
+outline = [[0.0, 0.0], [8.0, 0.0], [8.0, 3.6], [5.4, 3.6], [5.4, 6.0], [0.0, 6.0]]
+
+[dock]
+position = [0.0, 2.8]      # where the dock's back touches the left wall
+facing_deg = 0.0           # the dock faces +x, into the room
+
+# --- sleeping corner (bottom left) -------------------------------------------
+
+[[obstacles]]
+name = "bed"
+shape = "table"            # a bed is a table with a thick top...
+kind = "soft"
+center = [1.05, 0.80]
+size = [2.0, 1.5]
+height = 0.55
+top_thickness = 0.43       # ...whose underside (0.12 m) clears the robot (0.092 m)
+leg_radius = 0.04
+leg_inset = 0.06
+
+[[obstacles]]
+name = "nightstand"
+center = [2.35, 0.25]
+size = [0.40, 0.40]
+z = [0.0, 0.55]
+
+# --- living corner (top left) -------------------------------------------------
+
+[[obstacles]]
+name = "sofa"
+kind = "soft"
+center = [2.0, 5.5]
+size = [2.1, 0.9]
+z = [0.0, 0.85]
+
+[[obstacles]]
+name = "coffee table"
+shape = "table"
+center = [2.0, 4.2]
+size = [1.1, 0.55]
+height = 0.42
+
+[[obstacles]]
+name = "TV cabinet"
+center = [0.25, 4.2]
+size = [0.45, 1.4]
+z = [0.0, 0.5]
+
+[[obstacles]]
+name = "floor lamp"
+shape = "circle"
+center = [0.35, 5.6]
+radius = 0.15
+z = [0.0, 1.6]
+
+# --- dining set (bottom middle) -----------------------------------------------
+
+[[obstacles]]
+name = "dining table"
+shape = "table"
+center = [3.9, 1.6]
+size = [1.4, 0.8]
+height = 0.75
+leg_radius = 0.03
+
+[[obstacles]]
+name = "dining chair"
+shape = "chair"
+center = [3.55, 2.25]
+angle_deg = -90.0          # seat faces the table
+
+[[obstacles]]
+name = "dining chair"
+shape = "chair"
+center = [4.25, 2.25]
+angle_deg = -90.0
+
+[[obstacles]]
+name = "dining chair"
+shape = "chair"
+center = [3.55, 0.95]
+angle_deg = 90.0
+
+[[obstacles]]
+name = "dining chair"
+shape = "chair"
+center = [4.25, 0.95]
+angle_deg = 90.0
+
+[[obstacles]]
+name = "fiddle-leaf fig"
+kind = "plant"
+shape = "circle"
+center = [5.1, 0.25]
+radius = 0.2
+z = [0.0, 1.2]
+
+# --- kitchen (bottom right) ---------------------------------------------------
+
+[[obstacles]]
+name = "kitchen counter"
+kind = "appliance"
+center = [6.725, 0.32]
+size = [2.45, 0.6]
+z = [0.0, 0.9]
+
+[[obstacles]]
+name = "fridge"
+kind = "appliance"
+center = [7.64, 1.05]
+size = [0.68, 0.70]
+z = [0.0, 1.8]
+
+[[obstacles]]
+name = "trash can"
+kind = "box"
+shape = "circle"
+center = [5.75, 1.0]
+radius = 0.16
+z = [0.0, 0.6]
+mobility = 0.4
+
+[[obstacles]]
+name = "dog bowl"
+kind = "clutter"
+shape = "circle"
+center = [7.5, 3.2]
+radius = 0.1
+z = [0.0, 0.06]            # below the LiDAR plane
+mobility = 0.7
+
+# --- floor clutter --------------------------------------------------------------
+
+[[obstacles]]
+name = "laundry basket"
+kind = "box"
+center = [4.6, 3.1]
+size = [0.5, 0.36]
+angle_deg = 15.0
+z = [0.0, 0.45]
+mobility = 0.6
+
+[[obstacles]]
+name = "sock"
+kind = "clutter"
+center = [2.9, 3.1]
+size = [0.2, 0.07]
+angle_deg = 30.0
+z = [0.0, 0.02]            # invisible to LiDAR, very visible to the bumper
+mobility = 0.9
