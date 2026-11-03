@@ -32,7 +32,7 @@ class TeleopController:
         self.turn = _clamp_unit(turn)
         self.boost = boost
 
-    def reset(self) -> None:
+    def reset(self, seed: int = 0) -> None:
         self.set_intent(0.0, 0.0)
 
     def update(self, frame: SensorFrame, dt: float) -> DriveCommand:

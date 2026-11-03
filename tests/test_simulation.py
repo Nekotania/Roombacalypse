@@ -29,7 +29,8 @@ STUDIO_TOUR = [
 
 
 def _run_tour(seed: int = 42) -> list[tuple[float, float, float]]:
-    sim, _ = make_sim(load_room(resolve_room_path("studio")), STUDIO_TOUR)
+    # Default (noisy) config: calibration errors, slip and LiDAR noise all draw random numbers.
+    sim, _ = make_sim(load_room(resolve_room_path("studio")), STUDIO_TOUR, config=AppConfig())
     sim.reset(seed)
     trajectory = []
     for _ in range(round(sum(d for d, _ in STUDIO_TOUR) / sim.dt)):
@@ -40,6 +41,10 @@ def _run_tour(seed: int = 42) -> list[tuple[float, float, float]]:
 
 def test_simulation_is_bit_for_bit_deterministic() -> None:
     assert _run_tour() == _run_tour()
+
+
+def test_different_seeds_give_different_robots() -> None:
+    assert _run_tour(seed=1) != _run_tour(seed=2)  # different calibration errors and slip
 
 
 def test_controller_runs_at_control_rate() -> None:

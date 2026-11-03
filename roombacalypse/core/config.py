@@ -96,6 +96,171 @@ class RobotSpec:
 
 
 @dataclass(frozen=True)
+class DriveErrorConfig:
+    """Ground-truth imperfections of the drive. Only the simulator knows the drawn values.
+
+    They make wheel odometry wrong in the two classic ways (Borenstein & Feng,
+    UMBmark): *systematic* errors from unequal wheel radii and an uncertain
+    wheel base, and *random* errors from slip. All zeros gives ideal wheels.
+    """
+
+    wheel_radius_std: float = 0.002
+    """Relative std of each wheel's true radius (manufacturing tolerance), drawn per reset."""
+    wheel_base_std: float = 0.01
+    """Relative std of the true wheel base, drawn per reset."""
+    slip_std: float = 0.01
+    """Stationary relative std of the slowly varying per-wheel slip."""
+    slip_time_constant: float = 0.5
+    """Correlation time of the slip (an Ornstein-Uhlenbeck process) [s]."""
+
+    def __post_init__(self) -> None:
+        for name in ("wheel_radius_std", "wheel_base_std", "slip_std"):
+            _require(0.0 <= getattr(self, name) < 0.2, f"drive_errors.{name} must be in [0, 0.2)")
+        _require(self.slip_time_constant > 0.0, "drive_errors.slip_time_constant must be positive")
+
+
+@dataclass(frozen=True)
+class LidarConfig:
+    """2D scanning LiDAR on top of the robot (an LDS-style turret)."""
+
+    mount_height: float = 0.095
+    """Height of the scan plane [m]. Obstacles whose band does not contain it are invisible."""
+    mount_x: float = -0.02
+    """Turret position along the body x axis [m]."""
+    angular_resolution_deg: float = 1.0
+    """Angle between beams [deg]."""
+    fov_deg: float = 360.0
+    """Field of view [deg]; 360 means a full rotation."""
+    max_range: float = 6.0
+    """Beyond this distance there is no return [m]."""
+    range_noise_std: float = 0.008
+    """Constant part of the Gaussian range noise [m]."""
+    range_noise_per_metre: float = 0.004
+    """Range-proportional part of the noise: sigma = std + per_metre * range."""
+    dropout_probability: float = 0.01
+    """Chance that a beam returns nothing."""
+    scan_period: float = 0.2
+    """Time per scan [s] (5 Hz); a multiple of simulation.dt."""
+
+    def __post_init__(self) -> None:
+        _require(self.mount_height > 0.0, "lidar.mount_height must be positive")
+        _require(0.05 <= self.angular_resolution_deg <= 10.0, "lidar.angular_resolution_deg must be in [0.05, 10]")
+        _require(0.0 < self.fov_deg <= 360.0, "lidar.fov_deg must be in (0, 360]")
+        _require(self.max_range > 0.0, "lidar.max_range must be positive")
+        _require(self.range_noise_std >= 0.0 and self.range_noise_per_metre >= 0.0, "lidar noise must be >= 0")
+        _require(0.0 <= self.dropout_probability < 1.0, "lidar.dropout_probability must be in [0, 1)")
+        _require(self.scan_period > 0.0, "lidar.scan_period must be positive")
+
+
+@dataclass(frozen=True)
+class BumperConfig:
+    """Front bumper with a left and a right switch, like a Roomba."""
+
+    arc_deg: float = 180.0
+    """Front arc covered by the bumper, centred on the heading [deg]."""
+    center_deadband_deg: float = 15.0
+    """Hits within +-this of straight ahead close both switches [deg]."""
+
+    def __post_init__(self) -> None:
+        _require(0.0 < self.arc_deg <= 360.0, "bumper.arc_deg must be in (0, 360]")
+        _require(0.0 <= self.center_deadband_deg < 0.5 * self.arc_deg, "bumper.center_deadband_deg out of range")
+
+
+@dataclass(frozen=True)
+class EncoderConfig:
+    """Wheel encoders."""
+
+    ticks_per_revolution: float = 508.8
+    """Encoder counts per wheel revolution (the iRobot Create 2 figure)."""
+
+    def __post_init__(self) -> None:
+        _require(self.ticks_per_revolution > 0.0, "encoders.ticks_per_revolution must be positive")
+
+
+@dataclass(frozen=True)
+class DwaConfig:
+    """Dynamic Window Approach local planner (see docs/algorithms/dwa.md)."""
+
+    max_speed: float = 0.3
+    """Cruise speed cap [m/s] (robot vacuums clean at about 0.3 m/s)."""
+    max_angular_speed: float = 2.0
+    """Yaw rate cap [rad/s]."""
+    horizon: float = 1.5
+    """How far ahead each candidate arc is simulated [s]."""
+    prediction_step: float = 0.1
+    """Time between predicted points on an arc [s]."""
+    wheel_samples: int = 9
+    """Samples per wheel across the dynamic window (wheel_samples² candidates)."""
+    safety_margin: float = 0.03
+    """Clearance required beyond the body radius [m]."""
+    clearance_cap: float = 0.3
+    """Closest approach to obstacles (beyond the safety margin) above which an arc scores no better [m]."""
+    heading_weight: float = 0.2
+    """Weight of facing the goal at the end of the arc (mostly a tie-breaker)."""
+    progress_weight: float = 1.0
+    """Weight of getting closer to the goal over the horizon."""
+    clearance_weight: float = 0.4
+    """Weight of keeping away from obstacles (mean distance along the arc)."""
+    intrusion_weight: float = 1.0
+    """Penalty for entering the safety margin, scaled by how deep the arc goes into it."""
+    speed_weight: float = 0.2
+    """Weight of moving at all."""
+    obstacle_range: float = 2.5
+    """Obstacle points farther than this are ignored [m]."""
+
+    def __post_init__(self) -> None:
+        _require(self.max_speed > 0.0 and self.max_angular_speed > 0.0, "dwa speed caps must be positive")
+        _require(0.0 < self.prediction_step <= self.horizon, "dwa needs 0 < prediction_step <= horizon")
+        _require(self.wheel_samples >= 3 and self.wheel_samples % 2 == 1, "dwa.wheel_samples must be odd and >= 3")
+        _require(self.safety_margin >= 0.0 and self.clearance_cap > 0.0, "dwa margins must be positive")
+        for name in ("heading_weight", "progress_weight", "clearance_weight", "intrusion_weight", "speed_weight"):
+            _require(getattr(self, name) >= 0.0, f"dwa.{name} must be >= 0")
+        _require(self.obstacle_range > 0.0, "dwa.obstacle_range must be positive")
+
+
+@dataclass(frozen=True)
+class WanderConfig:
+    """Milestone-2 autonomous behaviour: explore without a map (see docs/algorithms/dwa.md)."""
+
+    goal_min_distance: float = 0.6
+    """Shortest exploration goal worth driving to [m]."""
+    goal_max_distance: float = 2.5
+    """Longest exploration goal [m]."""
+    goal_reached_tolerance: float = 0.25
+    """Distance at which a goal counts as reached [m]."""
+    goal_timeout: float = 15.0
+    """Give up on a goal after this long [s]."""
+    stall_time: float = 4.0
+    """Give up on a goal if the distance to it has not shrunk for this long [s]."""
+    candidate_step_deg: float = 15.0
+    """Angular spacing of candidate exploration directions [deg]."""
+    visit_cell_size: float = 0.5
+    """Cell size of the dead-reckoned visit counter used to prefer new areas [m]."""
+    backup_distance: float = 0.12
+    """How far to reverse after a bump [m]."""
+    backup_speed: float = 0.15
+    """Reversing speed [m/s]."""
+    turn_min_deg: float = 60.0
+    """Smallest escape turn after a bump [deg]."""
+    turn_max_deg: float = 150.0
+    """Largest escape turn after a bump [deg]."""
+    turn_speed: float = 1.5
+    """Escape turn rate [rad/s]."""
+    bump_memory_seconds: float = 20.0
+    """How long a bump location is remembered as an obstacle [s]."""
+
+    def __post_init__(self) -> None:
+        _require(0.0 < self.goal_min_distance < self.goal_max_distance, "wander goal distances out of order")
+        _require(self.goal_reached_tolerance > 0.0, "wander.goal_reached_tolerance must be positive")
+        _require(self.goal_timeout > 0.0 and self.stall_time > 0.0, "wander timeouts must be positive")
+        _require(0.0 < self.candidate_step_deg <= 90.0, "wander.candidate_step_deg must be in (0, 90]")
+        _require(self.visit_cell_size > 0.0, "wander.visit_cell_size must be positive")
+        _require(self.backup_distance >= 0.0 and self.backup_speed > 0.0, "wander backup values out of range")
+        _require(0.0 < self.turn_min_deg <= self.turn_max_deg < 180.0, "wander turn angles must be in (0, 180)")
+        _require(self.turn_speed > 0.0 and self.bump_memory_seconds >= 0.0, "wander turn/memory values out of range")
+
+
+@dataclass(frozen=True)
 class DockConfig:
     """Geometry of the charging station."""
 
@@ -180,12 +345,31 @@ class AppConfig:
     """Built-in room name (``config/rooms/<name>.toml``) or a path to a room file."""
     simulation: SimulationConfig = field(default_factory=SimulationConfig)
     robot: RobotSpec = field(default_factory=RobotSpec)
+    drive_errors: DriveErrorConfig = field(default_factory=DriveErrorConfig)
+    lidar: LidarConfig = field(default_factory=LidarConfig)
+    bumper: BumperConfig = field(default_factory=BumperConfig)
+    encoders: EncoderConfig = field(default_factory=EncoderConfig)
     dock: DockConfig = field(default_factory=DockConfig)
     physics: PhysicsConfig = field(default_factory=PhysicsConfig)
     teleop: TeleopConfig = field(default_factory=TeleopConfig)
+    dwa: DwaConfig = field(default_factory=DwaConfig)
+    wander: WanderConfig = field(default_factory=WanderConfig)
     viewer: ViewerConfig = field(default_factory=ViewerConfig)
 
     def __post_init__(self) -> None:
+        _require(
+            self.lidar.scan_period >= self.simulation.dt and is_multiple_of(self.lidar.scan_period, self.simulation.dt),
+            "lidar.scan_period must be a positive multiple of simulation.dt",
+        )
+        _require(
+            self.lidar.mount_height >= self.robot.height,
+            "lidar.mount_height must be >= robot.height (the turret sits on top; self-occlusion is not modelled)",
+        )
+        _require(abs(self.lidar.mount_x) < self.robot.radius, "lidar.mount_x must lie inside the body")
+        _require(
+            self.dwa.max_speed <= self.robot.max_wheel_speed, "dwa.max_speed must not exceed robot.max_wheel_speed"
+        )
+        _require(self.wander.backup_speed <= self.robot.max_wheel_speed, "wander.backup_speed exceeds the wheel limit")
         # A step must be much shorter than the robot radius, otherwise thin
         # obstacles (chair legs) could be tunnelled through between two steps.
         step = self.robot.max_wheel_speed * self.simulation.dt

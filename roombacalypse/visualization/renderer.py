@@ -13,14 +13,17 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 import pygame
 from pygame import gfxdraw
 
 from roombacalypse.core.config import RobotSpec
-from roombacalypse.core.geometry import Point, Pose2D, cross
+from roombacalypse.core.geometry import Point, Pose2D, cross, transform_points
+from roombacalypse.core.messages import LidarScan
 from roombacalypse.environment.shapes import Circle, Shape
 from roombacalypse.environment.world import Obstacle, ObstacleKind, World
+from roombacalypse.navigation.dwa import DwaPlan
 from roombacalypse.robot.body import RobotBody
 from roombacalypse.visualization import palette
 from roombacalypse.visualization.camera import Camera
@@ -29,6 +32,21 @@ WALL_THICKNESS = 0.08
 """Visual wall thickness [m], drawn outside the floor (physics walls are lines)."""
 
 _BOLT = ((0.2, 1.0), (-0.55, -0.1), (-0.02, -0.1), (-0.25, -1.0), (0.55, 0.12), (0.02, 0.12))
+
+
+@dataclass
+class Overlays:
+    """Optional sensor and belief layers, all drawn on top of the scene."""
+
+    scan: LidarScan | None = None
+    scan_pose: Pose2D | None = None
+    """True pose at the moment ``scan`` was taken."""
+    plan: DwaPlan | None = None
+    """Latest DWA decision; its arcs are in the body frame and drawn from the current true pose."""
+    goal: Point | None = None
+    """Exploration goal in world coordinates (as the robot believes it)."""
+    belief: Pose2D | None = None
+    """Where the robot's odometry thinks it is, in world coordinates."""
 
 
 class WorldRenderer:
@@ -50,6 +68,7 @@ class WorldRenderer:
         trail: Sequence[Point] = (),
         hover: Sequence[Obstacle] = (),
         ghost: tuple[Shape, bool] | None = None,
+        overlays: Overlays | None = None,
     ) -> None:
         """Draw the whole world view into ``camera.viewport``."""
         surface.set_clip(pygame.Rect(camera.viewport))
@@ -70,6 +89,8 @@ class WorldRenderer:
         if ghost is not None:
             shape, ok = ghost
             self._draw_translucent(overlay, camera, shape, palette.GHOST_OK if ok else palette.GHOST_BAD, 110)
+        if overlays is not None:
+            self._draw_overlays(overlay, camera, robot.pose, overlays)
         surface.blit(overlay, (0, 0))
 
         for part in hover:
@@ -184,6 +205,58 @@ class WorldRenderer:
             pygame.draw.circle(surface, color, camera.to_screen(shape.cx, shape.cy), r, width)
         else:
             pygame.draw.polygon(surface, color, [camera.to_screen(x, y) for x, y in shape.vertices], width)
+
+    # ------------------------------------------------------------------ overlays
+
+    def _draw_overlays(self, overlay: pygame.Surface, camera: Camera, pose: Pose2D, layers: Overlays) -> None:
+        if layers.plan is not None:
+            self._draw_plan(overlay, camera, pose, layers.plan)
+        if layers.goal is not None:
+            self._draw_goal(overlay, camera, layers.goal)
+        if layers.scan is not None and layers.scan_pose is not None:
+            self._draw_scan(overlay, camera, layers.scan, layers.scan_pose)
+        if layers.belief is not None:
+            self._draw_belief(overlay, camera, pose, layers.belief)
+
+    @staticmethod
+    def _draw_scan(overlay: pygame.Surface, camera: Camera, scan: LidarScan, pose: Pose2D) -> None:
+        origin = camera.to_screen(*pose.transform_point(scan.origin_x, scan.origin_y))
+        points = transform_points(pose, scan.points())
+        screen = [camera.to_screen(float(x), float(y)) for x, y in points]
+        for p in screen:
+            pygame.draw.line(overlay, palette.LIDAR_RAY, origin, p, 1)
+        for p in screen:
+            pygame.draw.circle(overlay, palette.LIDAR_HIT, p, 2)
+
+    @staticmethod
+    def _draw_plan(overlay: pygame.Surface, camera: Camera, pose: Pose2D, plan: DwaPlan) -> None:
+        for index, arc in enumerate(plan.trajectories):
+            if index == plan.chosen:
+                continue
+            color = palette.DWA_ADMISSIBLE if plan.admissible[index] else palette.DWA_REJECTED
+            points = [camera.to_screen(float(x), float(y)) for x, y in transform_points(pose, arc)]
+            pygame.draw.lines(overlay, color, False, points, 1)
+        if plan.chosen >= 0:
+            arc = plan.trajectories[plan.chosen]
+            points = [camera.to_screen(float(x), float(y)) for x, y in transform_points(pose, arc)]
+            pygame.draw.lines(overlay, palette.DWA_CHOSEN, False, points, 3)
+
+    @staticmethod
+    def _draw_goal(overlay: pygame.Surface, camera: Camera, goal: Point) -> None:
+        cx, cy = camera.to_screen(*goal)
+        r = max(4.0, camera.length(0.08))
+        color = (*palette.GOAL, 230)
+        pygame.draw.circle(overlay, color, (cx, cy), r, 2)
+        pygame.draw.line(overlay, color, (cx - 1.6 * r, cy), (cx + 1.6 * r, cy), 2)
+        pygame.draw.line(overlay, color, (cx, cy - 1.6 * r), (cx, cy + 1.6 * r), 2)
+
+    def _draw_belief(self, overlay: pygame.Surface, camera: Camera, truth: Pose2D, belief: Pose2D) -> None:
+        color = (*palette.BELIEF, 220)
+        centre = camera.to_screen(belief.x, belief.y)
+        pygame.draw.line(overlay, (*palette.BELIEF, 140), camera.to_screen(truth.x, truth.y), centre, 1)
+        pygame.draw.circle(overlay, color, centre, max(4.0, camera.length(self.spec.radius)), 2)
+        tip = camera.to_screen(*belief.transform_point(self.spec.radius, 0.0))
+        pygame.draw.line(overlay, color, centre, tip, 2)
 
     # ------------------------------------------------------------------ robot
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "roombacalypse"
-version = "0.1.0"
+version = "0.2.0"
 description = "An unnecessarily overengineered autonomous robotic vacuum simulator."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -48,7 +48,10 @@ include = ["roombacalypse*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "-ra"
+addopts = "-ra -m 'not slow'"
+markers = [
+    "slow: long acceptance scenarios (minutes); run with `pytest -m slow`",
+]
 
 [tool.ruff]
 line-length = 120
@@ -64,3 +67,7 @@ warn_unused_ignores = true
 warn_redundant_casts = true
 disallow_untyped_defs = true
 no_implicit_optional = true
+
+[[tool.mypy.overrides]]
+module = ["scipy", "scipy.*"]  # SciPy ships no type stubs; not worth a scipy-stubs dependency
+ignore_missing_imports = true

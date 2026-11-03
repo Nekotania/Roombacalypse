@@ -17,16 +17,17 @@ from pathlib import Path
 
 import pygame
 
-from roombacalypse.autonomy.teleop import TeleopController
+from roombacalypse.autonomy.brain import Mode, RobotBrain
 from roombacalypse.core.config import ViewerConfig
 from roombacalypse.core.geometry import Point
 from roombacalypse.environment.catalog import PLACEABLE
 from roombacalypse.environment.shapes import Shape
 from roombacalypse.environment.world import Obstacle
+from roombacalypse.evaluation.coverage import FootprintCoverage
 from roombacalypse.simulation.engine import Simulation
 from roombacalypse.visualization import hud
 from roombacalypse.visualization.camera import Camera
-from roombacalypse.visualization.renderer import WorldRenderer
+from roombacalypse.visualization.renderer import Overlays, WorldRenderer
 
 logger = logging.getLogger(__name__)
 
@@ -35,19 +36,23 @@ TRAIL_SAMPLE_PERIOD = 0.1  # [s] of simulation time between trail points
 TOAST_SECONDS = 3.5
 
 HELP_LINES: tuple[tuple[str, str], ...] = (
-    ("Arrows / WASD", "drive"),
+    ("Tab", "manual <-> autonomous"),
+    ("Arrows / WASD", "drive (manual mode)"),
     ("Shift (held)", "boost to full wheel speed"),
     ("Space", "pause / resume"),
     ("N", "single step while paused"),
     ("+ / -", "faster / slower simulation"),
     ("R / Shift+R", "reset (same seed / next seed)"),
+    ("L", "LiDAR rays"),
+    ("G", "navigation: goal and DWA arcs"),
+    ("E", "belief: where odometry thinks it is"),
+    ("T", "trail"),
     ("Left click", "place obstacle"),
     ("O", "cycle obstacle type"),
     ("X", "remove obstacle under cursor"),
     ("Wheel", "zoom at cursor"),
     ("Middle / Alt+left drag", "pan"),
     ("0", "fit room to window"),
-    ("T", "toggle trail"),
     ("F12", "save screenshot to out/"),
     ("H / F1", "toggle this help"),
     ("Esc / Q", "quit"),
@@ -55,12 +60,12 @@ HELP_LINES: tuple[tuple[str, str], ...] = (
 
 
 class Viewer:
-    """Interactive front-end for a :class:`Simulation` driven by a :class:`TeleopController`."""
+    """Interactive front-end for a :class:`Simulation` and the robot's :class:`RobotBrain`."""
 
     def __init__(
         self,
         sim: Simulation,
-        teleop: TeleopController,
+        brain: RobotBrain,
         config: ViewerConfig,
         *,
         offscreen: bool = False,
@@ -71,7 +76,7 @@ class Viewer:
         pygame.display.set_caption("ROOMBACALYPSE")
         self.screen = pygame.display.set_mode((config.width, config.height))
         self.sim = sim
-        self.teleop = teleop
+        self.brain = brain
         self.config = config
         self.read_keyboard = not offscreen
         self.world_rect = pygame.Rect(0, 0, config.width - config.panel_width, config.height)
@@ -85,8 +90,12 @@ class Viewer:
         self.running = True
         self.show_help = False
         self.show_trail = True
+        self.show_lidar = True
+        self.show_nav = True
+        self.show_belief = False
         self.template_index = 0
         self.trail: deque[Point] = deque(maxlen=max(2, int(config.trail_seconds / TRAIL_SAMPLE_PERIOD)))
+        self.coverage = self._new_coverage()
         self._last_trail_time = -1.0
         self._accumulator = 0.0
         self._achieved_speed = 0.0
@@ -96,7 +105,7 @@ class Viewer:
         self._toasts: list[tuple[str, float]] = []
         self._panning = False
         self._step_once = False
-        self.toast("Welcome. Arrow keys drive, H for help.")
+        self.toast("Welcome. Tab hands control to the robot; H for help.")
 
     # ------------------------------------------------------------------ public API
 
@@ -148,15 +157,13 @@ class Viewer:
         if self.paused:
             self._achieved_speed = 0.0
             if self._step_once:
-                sim.step()
-                self._record_trail()
+                self._step()
                 self._step_once = False
             return
         self._accumulator += min(frame_seconds, 0.1) * self.speed
         steps = 0
         while self._accumulator >= sim.dt and steps < self.config.max_steps_per_frame:
-            sim.step()
-            self._record_trail()
+            self._step()
             self._accumulator -= sim.dt
             steps += 1
         self._lagging = self._accumulator >= sim.dt
@@ -166,14 +173,21 @@ class Viewer:
             achieved = steps * sim.dt / frame_seconds
             self._achieved_speed += 0.1 * (achieved - self._achieved_speed)
 
-    def _record_trail(self) -> None:
+    def _step(self) -> None:
+        self.sim.step()
+        pose = self.sim.robot.pose
+        self.coverage.mark(pose.x, pose.y)
         if self.sim.time - self._last_trail_time >= TRAIL_SAMPLE_PERIOD:
-            self.trail.append(self.sim.robot.pose.position)
+            self.trail.append(pose.position)
             self._last_trail_time = self.sim.time
+
+    def _new_coverage(self) -> FootprintCoverage:
+        return FootprintCoverage(self.sim.world, self.sim.spec, self.sim.robot.pose.position)
 
     def _reset(self, seed: int | None = None) -> None:
         self.sim.reset(seed)
         self.trail.clear()
+        self.coverage = self._new_coverage()
         self._last_trail_time = -1.0
         self._accumulator = 0.0
         self.toast(f"Reset: {self.sim.room.name}, seed {self.sim.seed}")
@@ -181,11 +195,13 @@ class Viewer:
     # ------------------------------------------------------------------ input
 
     def _update_teleop(self) -> None:
+        if self.brain.mode is not Mode.MANUAL:
+            return
         keys = pygame.key.get_pressed()
         throttle = int(keys[pygame.K_UP] or keys[pygame.K_w]) - int(keys[pygame.K_DOWN] or keys[pygame.K_s])
         turn = int(keys[pygame.K_LEFT] or keys[pygame.K_a]) - int(keys[pygame.K_RIGHT] or keys[pygame.K_d])
         boost = bool(pygame.key.get_mods() & pygame.KMOD_SHIFT)
-        self.teleop.set_intent(throttle, turn, boost)
+        self.brain.teleop.set_intent(throttle, turn, boost)
 
     def _handle_events(self) -> None:
         for event in pygame.event.get():
@@ -212,6 +228,9 @@ class Viewer:
         shift = bool(mods & pygame.KMOD_SHIFT)
         if key in (pygame.K_ESCAPE, pygame.K_q):
             self.running = False
+        elif key == pygame.K_TAB:
+            mode = self.brain.toggle_mode()
+            self.toast("Autonomous: the robot is driving." if mode is Mode.AUTONOMOUS else "Manual: you are driving.")
         elif key == pygame.K_SPACE:
             self.paused = not self.paused
             self.toast("Paused" if self.paused else "Resumed")
@@ -226,13 +245,21 @@ class Viewer:
             self.toast(f"Speed x{self.speed:g}")
         elif key == pygame.K_r:
             self._reset(self.sim.seed + 1 if shift else None)
+        elif key == pygame.K_l:
+            self.show_lidar = not self.show_lidar
+        elif key == pygame.K_g:
+            self.show_nav = not self.show_nav
+        elif key == pygame.K_e:
+            self.show_belief = not self.show_belief
+            if self.show_belief:
+                self.toast("Purple: where dead reckoning thinks the robot is.")
+        elif key == pygame.K_t:
+            self.show_trail = not self.show_trail
         elif key == pygame.K_o:
             self.template_index = (self.template_index + 1) % len(PLACEABLE)
             self.toast(f"Placing: {PLACEABLE[self.template_index].description}")
         elif key == pygame.K_x:
             self._remove_at(pygame.mouse.get_pos())
-        elif key == pygame.K_t:
-            self.show_trail = not self.show_trail
         elif key in (pygame.K_h, pygame.K_F1):
             self.show_help = not self.show_help
         elif key == pygame.K_0:
@@ -241,8 +268,6 @@ class Viewer:
             stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
             path = self.save_screenshot(Path("out") / f"screenshot-{stamp}.png")
             self.toast(f"Saved {path}")
-        elif key == pygame.K_TAB:
-            self.toast("Autonomy module not installed (milestone 2). Drive me yourself, like an animal.")
 
     def _place_at(self, screen_pos: tuple[int, int]) -> None:
         template = PLACEABLE[self.template_index]
@@ -261,6 +286,23 @@ class Viewer:
         return Camera.fit(self.sim.world.bounds, (0, 0, self.world_rect.width, self.world_rect.height))
 
     # ------------------------------------------------------------------ drawing
+
+    def _overlays(self) -> Overlays:
+        layers = Overlays()
+        if self.show_lidar:
+            layers.scan, layers.scan_pose = self.sim.last_scan, self.sim.last_scan_pose
+        autonomous = self.brain.mode is Mode.AUTONOMOUS
+        if self.show_nav and autonomous:
+            layers.plan = self.brain.wander.plan
+            goal = self.brain.wander.goal
+            if goal is not None:
+                # The goal lives in the odometry frame. Draw it *relative to the robot*, like the DWA
+                # arcs, so it shows where the robot is actually heading; drift is shown by the E layer.
+                relative = self.brain.odometry.pose.inverse_transform_point(*goal)
+                layers.goal = self.sim.robot.pose.transform_point(*relative)
+        if self.show_belief:
+            layers.belief = self.sim.boot_pose.compose(self.brain.odometry.pose)
+        return layers
 
     def _draw(self) -> None:
         mouse = pygame.mouse.get_pos()
@@ -282,8 +324,10 @@ class Viewer:
         self.renderer.draw(
             self.screen, self.sim.world, self.sim.robot, self.camera,
             trail=[*self.trail, self.sim.robot.pose.position] if self.show_trail else (),
-            hover=hover, ghost=ghost,
+            hover=hover, ghost=ghost, overlays=self._overlays(),
         )
+        toggles = (("lidar", self.show_lidar), ("nav", self.show_nav), ("belief", self.show_belief))
+        layers = " · ".join(name for name, on in toggles if on)
         ui = hud.UiState(
             speed=self.speed,
             achieved_speed=self._achieved_speed,
@@ -291,8 +335,10 @@ class Viewer:
             lagging=self._lagging,
             fps=self._fps,
             placing=PLACEABLE[self.template_index].label,
+            coverage=self.coverage.fraction,
+            layers=layers or "none",
         )
-        hud.draw_panel(self.screen, self.panel_rect, self.fonts, self.sim, ui)
+        hud.draw_panel(self.screen, self.panel_rect, self.fonts, self.sim, self.brain, ui)
         self._toasts = [(text, until) for text, until in self._toasts if until > self._clock_seconds]
         hud.draw_toasts(self.screen, self.world_rect, self.fonts, [text for text, _ in self._toasts])
         if hovered is not None:

@@ -1,8 +1,9 @@
 """Command-line entry point and composition root.
 
 This is the only place that knows every concrete class: it loads the
-configuration and room, builds the simulation and the robot's software, and
-hands them to the viewer.
+configuration and room, builds the simulation and the robot's software,
+wires the shared event log, and hands everything to the viewer or the
+headless scenario runner.
 """
 
 from __future__ import annotations
@@ -15,13 +16,16 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from roombacalypse import __version__
-from roombacalypse.autonomy.teleop import TeleopController
+from roombacalypse.autonomy.brain import Mode, RobotBrain
 from roombacalypse.core.config import AppConfig, ConfigError, load_config
+from roombacalypse.core.events import EventLog
 from roombacalypse.core.paths import available_rooms, default_config_path, resolve_room_path
-from roombacalypse.environment.rooms import RoomError, load_room
+from roombacalypse.environment.rooms import RoomError, RoomSpec, load_room
 from roombacalypse.simulation.engine import Simulation
 
 logger = logging.getLogger("roombacalypse")
+
+MODES = {"manual": Mode.MANUAL, "auto": Mode.AUTONOMOUS}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -36,7 +40,13 @@ def build_parser() -> argparse.ArgumentParser:
                         help="extra TOML config layered over config/default.toml (repeatable)")
     parser.add_argument("--set", dest="overrides", action="append", default=[], metavar="KEY=VALUE",
                         help="override one config value, e.g. --set robot.max_wheel_speed=0.3 (repeatable)")
+    parser.add_argument("--mode", choices=sorted(MODES),
+                        help="initial control mode (default: manual with a window, auto when headless)")
     parser.add_argument("--list-rooms", action="store_true", help="list built-in rooms and exit")
+    parser.add_argument("--headless", action="store_true",
+                        help="simulate without a window for --duration seconds and print a scorecard")
+    parser.add_argument("--duration", type=float, default=600.0,
+                        help="simulated seconds for --headless (default 600)")
     parser.add_argument("--screenshot", type=Path, metavar="PNG",
                         help="render offscreen for --frames frames, save a screenshot and exit")
     parser.add_argument("--frames", type=int, default=60, help="frames to render with --screenshot (default 60)")
@@ -56,6 +66,15 @@ def load_app_config(args: argparse.Namespace) -> AppConfig:
     return config
 
 
+def run_headless(config: AppConfig, room: RoomSpec, mode: Mode, duration: float) -> int:
+    from roombacalypse.evaluation.scenario import run_scenario
+
+    logger.info("headless run: %s, %.0f s simulated, mode %s", room.name, duration, mode.value)
+    result = run_scenario(config, room, duration=duration, mode=mode)
+    print(result.summary())
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=args.log_level, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
@@ -73,9 +92,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         logger.error("%s", exc)
         return 2
 
-    teleop = TeleopController(config.teleop)
+    mode = MODES[args.mode] if args.mode else (Mode.AUTONOMOUS if args.headless else Mode.MANUAL)
+    if args.headless:
+        if args.duration <= 0:
+            logger.error("--duration must be positive")
+            return 2
+        try:
+            return run_headless(config, room, mode, args.duration)
+        except RoomError as exc:
+            logger.error("%s", exc)
+            return 2
+
+    events = EventLog()
+    brain = RobotBrain(config, publish=events.publisher("robot"), mode=mode)
     try:
-        sim = Simulation(config, room, teleop)
+        sim = Simulation(config, room, brain, events=events)
     except RoomError as exc:
         logger.error("%s", exc)
         return 2
@@ -83,7 +114,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     # Imported here so that pygame is only needed when a window is opened.
     from roombacalypse.visualization.viewer import Viewer
 
-    viewer = Viewer(sim, teleop, config.viewer, offscreen=args.screenshot is not None)
+    viewer = Viewer(sim, brain, config.viewer, offscreen=args.screenshot is not None)
     if args.screenshot is not None:
         viewer.run_frames(max(1, args.frames))
         viewer.save_screenshot(args.screenshot)

@@ -18,6 +18,8 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+import numpy as np
+
 Point = tuple[float, float]
 """A 2D point or vector ``(x, y)`` in metres."""
 
@@ -90,6 +92,41 @@ class Pose2D:
     def distance_to(self, other: Pose2D) -> float:
         """Euclidean distance between the two positions (ignores heading)."""
         return math.hypot(other.x - self.x, other.y - self.y)
+
+
+def transform_points(pose: Pose2D, points: np.ndarray) -> np.ndarray:
+    """Map ``(N, 2)`` points from ``pose``'s local frame into its parent frame (vectorised)."""
+    c, s = math.cos(pose.theta), math.sin(pose.theta)
+    x, y = points[:, 0], points[:, 1]
+    return np.column_stack((pose.x + c * x - s * y, pose.y + s * x + c * y))
+
+
+def inverse_transform_points(pose: Pose2D, points: np.ndarray) -> np.ndarray:
+    """Map ``(N, 2)`` points from the parent frame into ``pose``'s local frame (vectorised)."""
+    c, s = math.cos(pose.theta), math.sin(pose.theta)
+    dx, dy = points[:, 0] - pose.x, points[:, 1] - pose.y
+    return np.column_stack((c * dx + s * dy, -s * dx + c * dy))
+
+
+def wrap_angles(angles: np.ndarray) -> np.ndarray:
+    """Vectorised :func:`wrap_angle`."""
+    return (angles + math.pi) % TAU - math.pi
+
+
+def points_in_polygon(px: np.ndarray, py: np.ndarray, vertices: Sequence[Point]) -> np.ndarray:
+    """Vectorised even-odd test: which of the points (any matching shapes) lie inside the polygon."""
+    inside = np.zeros(np.broadcast(px, py).shape, dtype=bool)
+    n = len(vertices)
+    j = n - 1
+    for i in range(n):
+        xi, yi = vertices[i]
+        xj, yj = vertices[j]
+        if yi != yj:
+            straddles = (yi > py) != (yj > py)
+            x_cross = xi + (py - yi) * (xj - xi) / (yj - yi)
+            inside ^= straddles & (px < x_cross)
+        j = i
+    return inside
 
 
 def cross(ax: float, ay: float, bx: float, by: float) -> float:

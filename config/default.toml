@@ -22,6 +22,30 @@ wheel_radius = 0.036       # drive wheel radius [m]
 max_wheel_speed = 0.5      # per-wheel surface speed limit [m/s]
 max_wheel_accel = 1.0      # per-wheel acceleration limit [m/s^2]
 
+[drive_errors]             # GROUND TRUTH ONLY: drawn per reset, never visible to the robot
+wheel_radius_std = 0.002   # relative std of each wheel's true radius (unequal wheels -> curved "straight" lines)
+wheel_base_std = 0.01      # relative std of the true wheel base (turns come out slightly wrong)
+slip_std = 0.01            # stationary relative std of the slowly varying wheel slip
+slip_time_constant = 0.5   # correlation time of the slip [s]
+
+[lidar]                    # 2D scanner on top of the robot
+mount_height = 0.095       # scan plane [m]: sees table legs, not socks or bed undersides
+mount_x = -0.02            # turret position along the body x axis [m]
+angular_resolution_deg = 1.0
+fov_deg = 360.0
+max_range = 6.0            # [m]; beyond this: no return (inf)
+range_noise_std = 0.008    # sigma = range_noise_std + range_noise_per_metre * range  [m]
+range_noise_per_metre = 0.004
+dropout_probability = 0.01 # chance that a beam returns nothing
+scan_period = 0.2          # 5 Hz; multiple of simulation.dt
+
+[bumper]
+arc_deg = 180.0            # front arc covered by the bumper
+center_deadband_deg = 15.0 # hits within +-this of straight ahead close both switches
+
+[encoders]
+ticks_per_revolution = 508.8
+
 [dock]
 width = 0.32               # along the wall [m]
 depth = 0.10               # into the room [m]
@@ -36,6 +60,36 @@ max_solver_iterations = 8  # penetration-resolution passes per step
 linear_speed = 0.3         # arrow-key driving speed [m/s]
 boost_linear_speed = 0.5   # with Shift held [m/s]
 angular_speed = 2.0        # turn rate [rad/s]
+
+[dwa]                      # Dynamic Window Approach local planner
+max_speed = 0.3            # cruise speed cap [m/s]
+max_angular_speed = 2.0    # [rad/s]
+horizon = 1.5              # how far ahead each candidate arc is simulated [s]
+prediction_step = 0.1      # [s]
+wheel_samples = 9          # samples per wheel across the dynamic window (odd)
+safety_margin = 0.03       # clearance beyond the body radius [m]
+clearance_cap = 0.3        # closest approach beyond the margin above which an arc scores no better [m]
+heading_weight = 0.2       # facing the goal at the end of the arc (mostly a tie-breaker)
+progress_weight = 1.0      # getting closer to the goal over the horizon
+clearance_weight = 0.4     # keeping away from obstacles (mean distance along the arc)
+intrusion_weight = 1.0     # penalty for dipping into the safety margin
+speed_weight = 0.2         # moving at all
+obstacle_range = 2.5       # ignore obstacle points farther than this [m]
+
+[wander]                   # milestone-2 autonomous exploration without a map
+goal_min_distance = 0.6    # [m]
+goal_max_distance = 2.5    # [m]
+goal_reached_tolerance = 0.25
+goal_timeout = 15.0        # [s]
+stall_time = 4.0           # drop a goal if the distance to it stops shrinking for this long [s]
+candidate_step_deg = 15.0  # spacing of candidate exploration directions
+visit_cell_size = 0.5      # dead-reckoned visit counter cell [m]
+backup_distance = 0.12     # reverse this far after a bump [m]
+backup_speed = 0.15        # [m/s]
+turn_min_deg = 60.0        # escape turn after a bump, drawn from [min, max]
+turn_max_deg = 150.0
+turn_speed = 1.5           # [rad/s]
+bump_memory_seconds = 20.0 # how long a bump location is treated as an obstacle [s]
 
 [viewer]
 width = 1280               # window size [px]

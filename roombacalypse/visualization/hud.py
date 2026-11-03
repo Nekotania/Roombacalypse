@@ -9,6 +9,8 @@ from dataclasses import dataclass
 import pygame
 
 from roombacalypse import __version__
+from roombacalypse.autonomy.brain import Mode, RobotBrain
+from roombacalypse.core.events import EventKind
 from roombacalypse.robot.body import Contact
 from roombacalypse.simulation.engine import Simulation
 from roombacalypse.visualization import palette
@@ -37,6 +39,10 @@ class UiState:
     lagging: bool
     fps: float
     placing: str
+    coverage: float
+    """Fraction of the accessible floor swept so far (ground truth)."""
+    layers: str
+    """Which overlays are on, e.g. ``"lidar · nav · belief"``."""
 
 
 class TextColumn:
@@ -95,55 +101,83 @@ def describe_contact(sim: Simulation, contact: Contact) -> str:
     return f"{name} ({bearing_word(contact.bearing(sim.robot.pose))})"
 
 
-def draw_panel(surface: pygame.Surface, rect: pygame.Rect, fonts: Fonts, sim: Simulation, ui: UiState) -> None:
-    """Draw the status panel on the right."""
+_SOURCE_COLORS = {"robot": palette.ACCENT, "sim": palette.TEXT_DIM, "user": palette.WARN}
+
+
+def draw_panel(
+    surface: pygame.Surface, rect: pygame.Rect, fonts: Fonts, sim: Simulation, brain: RobotBrain, ui: UiState
+) -> None:
+    """Draw the status panel on the right: truth, sensors, belief, statistics, events."""
     pygame.draw.rect(surface, palette.PANEL_BG, rect)
     pygame.draw.line(surface, palette.PANEL_RULE, rect.topleft, rect.bottomleft, 2)
     col = TextColumn(surface, rect, fonts)
     col.title("ROOMBACALYPSE")
-    col.line(f"v{__version__} · milestone 1: it moves", palette.TEXT_DIM, fonts.small)
+    col.line(f"v{__version__} · milestone 2: it sees", palette.TEXT_DIM, fonts.small)
 
     col.section("simulation")
     col.row("time", format_time(sim.time))
     if ui.paused:
         col.row("speed", "PAUSED", palette.WARN)
     else:
-        lag_color = palette.WARN if ui.lagging else palette.TEXT
-        col.row("speed", f"x{ui.speed:g}  (actual x{ui.achieved_speed:.1f})", lag_color)
-    col.row("room", sim.room.name)
-    col.row("seed", str(sim.seed))
+        color = palette.WARN if ui.lagging else palette.TEXT
+        col.row("speed", f"x{ui.speed:g}  (actual x{ui.achieved_speed:.1f})", color)
+    col.row("room", f"{sim.room.name} · seed {sim.seed}")
 
     col.section("control")
-    col.row("mode", sim.controller.name.upper(), palette.ACCENT)
-    col.row("command", f"v {sim.command.linear:+.2f} m/s")
-    col.row("", f"ω {sim.command.angular:+.2f} rad/s")
+    if brain.mode is Mode.AUTONOMOUS:
+        col.row("mode", f"AUTONOMOUS · {brain.wander.state.value}", palette.ACCENT)
+        goal = brain.wander.goal
+        if goal is not None:
+            odom = brain.odometry.pose
+            col.row("goal", f"{math.hypot(goal[0] - odom.x, goal[1] - odom.y):.2f} m away (belief)")
+        else:
+            col.row("goal", "none")
+    else:
+        col.row("mode", "MANUAL · Tab for autonomy", palette.ACCENT)
+        col.row("goal", "you are the goal")
+    col.row("command", f"v {sim.command.linear:+.2f} m/s  ω {sim.command.angular:+.2f}")
 
     body = sim.robot
     pose = body.pose
     col.section("robot · ground truth")
-    col.row("position", f"x {pose.x:5.2f}  y {pose.y:5.2f} m")
-    col.row("heading", f"{math.degrees(pose.theta):+6.1f}°")
-    col.row("velocity", f"v {body.linear_velocity:+.2f} m/s")
-    col.row("", f"ω {body.angular_velocity:+.2f} rad/s")
-    col.row("wheels", f"L {body.v_left:+.2f}  R {body.v_right:+.2f} m/s")
-    col.row("odometer", f"{body.odometer:.2f} m")
+    col.row("pose", f"x {pose.x:4.2f} y {pose.y:4.2f} θ {math.degrees(pose.theta):+4.0f}°")
+    col.row("velocity", f"v {body.linear_velocity:+.2f} m/s  ω {body.angular_velocity:+.2f}")
     if body.contacts:
         col.row("contact", describe_contact(sim, body.contacts[0]), palette.BAD)
-        for contact in body.contacts[1:3]:
-            col.row("", describe_contact(sim, contact), palette.BAD)
     else:
         col.row("contact", "none", palette.GOOD)
-    if body.blocked:
-        col.row("", "pinned (move cancelled)", palette.WARN)
 
-    col.section("world")
-    col.row("obstacles", str(len(sim.world.obstacles)))
-    col.row("floor", f"{sim.world.floor_area:.1f} m²")
-    col.row("placing", ui.placing)
+    col.section("sensors · what the robot gets")
+    scan = brain.last_scan
+    if scan is None:
+        col.row("lidar", "no scan yet", palette.TEXT_DIM)
+    else:
+        valid = int(scan.valid.sum())
+        nearest = float(scan.ranges[scan.valid].min()) if valid else math.inf
+        col.row("lidar", f"{valid}/{scan.ranges.shape[0]} · nearest {nearest:.2f} m")
+    bumper = brain.last_bumper
+    col.row("bumper", f"L {'■' if bumper.left else '□'}   R {'■' if bumper.right else '□'}",
+            palette.BAD if bumper.pressed else palette.TEXT)
+    col.row("odometry", f"{brain.odometry.distance:.2f} m travelled")
+
+    col.section("belief · dead reckoning")
+    belief = sim.boot_pose.compose(brain.odometry.pose)
+    drift = belief.distance_to(pose)
+    heading_error = abs(math.degrees(math.remainder(belief.theta - pose.theta, 2 * math.pi)))
+    col.row("drift", f"{drift:.2f} m · {heading_error:.1f}° from truth", palette.WARN if drift > 0.5 else palette.TEXT)
+
+    col.section("statistics")
+    col.row("distance", f"{body.odometer:.1f} m · swept {100 * ui.coverage:.0f}% of floor")
+    col.row("bumps", f"{brain.bumps} felt · {sim.events.count(EventKind.COLLISION)} contacts")
+
+    col.section("events")
+    for event in reversed(sim.events.recent(5)):
+        text = f"{format_time(event.time)[3:]}  {event.message}"
+        col.line(text[:44], _SOURCE_COLORS.get(event.source, palette.TEXT), fonts.small)
 
     col.y = rect.bottom - 2 * fonts.small.get_linesize() - 10
-    col.line("H help · Space pause · R reset · Esc quit", palette.TEXT_DIM, fonts.small)
-    col.line(f"{ui.fps:4.0f} fps", palette.TEXT_DIM, fonts.small)
+    col.line("H help · Tab mode · L G E layers · Esc quit", palette.TEXT_DIM, fonts.small)
+    col.line(f"{ui.fps:3.0f} fps · layers: {ui.layers}", palette.TEXT_DIM, fonts.small)
 
 
 def draw_toasts(surface: pygame.Surface, area: pygame.Rect, fonts: Fonts, messages: Sequence[str]) -> None:

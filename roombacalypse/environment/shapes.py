@@ -15,6 +15,8 @@ import math
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 
+import numpy as np
+
 from roombacalypse.core.geometry import (
     Point,
     closest_point_on_segment,
@@ -102,6 +104,10 @@ class Circle:
     def contains_point(self, px: float, py: float) -> bool:
         return math.hypot(px - self.cx, py - self.cy) <= self.radius
 
+    def contains_points(self, px: np.ndarray, py: np.ndarray) -> np.ndarray:
+        """Vectorised :meth:`contains_point`."""
+        return (px - self.cx) ** 2 + (py - self.cy) ** 2 <= self.radius**2
+
 
 @dataclass(frozen=True, slots=True)
 class ConvexPolygon:
@@ -180,6 +186,13 @@ class ConvexPolygon:
             if (px - ax) * nx + (py - ay) * ny > 1e-12:
                 return False
         return True
+
+    def contains_points(self, px: np.ndarray, py: np.ndarray) -> np.ndarray:
+        """Vectorised :meth:`contains_point`."""
+        inside = np.ones(np.broadcast(px, py).shape, dtype=bool)
+        for (ax, ay), (nx, ny) in zip(self.vertices, self._normals, strict=True):
+            inside &= (px - ax) * nx + (py - ay) * ny <= 1e-12
+        return inside
 
     def closest_boundary_point(self, px: float, py: float) -> tuple[float, float, int]:
         """Closest point on the boundary to P, and the index of its edge."""

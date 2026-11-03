@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
+
 from roombacalypse.core.geometry import Pose2D
 
 _SERIES_THRESHOLD = 1e-4
@@ -56,6 +58,16 @@ def arc_displacement(distance: float, dtheta: float) -> tuple[float, float]:
         distance * math.sin(dtheta) / dtheta,
         distance * (1.0 - math.cos(dtheta)) / dtheta,
     )
+
+
+def arc_displacement_array(distance: np.ndarray, dtheta: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Vectorised :func:`arc_displacement` (same formula and series branch; tested to agree)."""
+    small = np.abs(dtheta) < _SERIES_THRESHOLD
+    safe = np.where(small, 1.0, dtheta)
+    t2 = dtheta * dtheta
+    dx = np.where(small, distance * (1.0 - t2 / 6.0), distance * np.sin(dtheta) / safe)
+    dy = np.where(small, distance * (0.5 * dtheta - dtheta * t2 / 24.0), distance * (1.0 - np.cos(dtheta)) / safe)
+    return dx, dy
 
 
 def integrate_wheel_travel(pose: Pose2D, d_left: float, d_right: float, wheel_base: float) -> Pose2D:

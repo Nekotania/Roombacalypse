@@ -1,13 +1,15 @@
 """Message types that cross the wall between simulator and robot software.
 
-The robot's software receives a :class:`SensorFrame` and answers with a
-:class:`DriveCommand`. Nothing else crosses. Later milestones add sensor
-readings (LiDAR scans, bumper, odometry, battery, dirt) as fields of the frame.
+Each control tick the robot's software receives one :class:`SensorFrame` and
+answers with one :class:`DriveCommand`. Nothing else crosses. Readings are
+immutable; array fields are made read-only by the sensors that create them.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+
+import numpy as np
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,14 +31,68 @@ STOP = DriveCommand()
 """The zero command."""
 
 
+@dataclass(frozen=True, slots=True, eq=False)
+class LidarScan:
+    """One 2D LiDAR sweep.
+
+    ``ranges[i]`` is the distance measured along ``angles[i]`` (radians,
+    relative to the robot's heading, CCW positive), or ``inf`` when the beam
+    returned nothing (out of range or a dropout), following ROS REP 117.
+    ``origin_x/origin_y`` is the sensor's position in the robot body frame;
+    the robot knows its own geometry.
+    """
+
+    time: float
+    angles: np.ndarray
+    ranges: np.ndarray
+    max_range: float
+    origin_x: float = 0.0
+    origin_y: float = 0.0
+
+    @property
+    def valid(self) -> np.ndarray:
+        """Boolean mask of beams that returned something."""
+        return np.isfinite(self.ranges)
+
+    def points(self) -> np.ndarray:
+        """Valid returns as an ``(M, 2)`` array of points in the robot body frame."""
+        mask = np.isfinite(self.ranges)
+        r = self.ranges[mask]
+        a = self.angles[mask]
+        return np.column_stack((self.origin_x + r * np.cos(a), self.origin_y + r * np.sin(a)))
+
+
+@dataclass(frozen=True, slots=True)
+class BumperReading:
+    """Bumper switches, latched since the previous reading."""
+
+    left: bool = False
+    right: bool = False
+
+    @property
+    def pressed(self) -> bool:
+        return self.left or self.right
+
+
+@dataclass(frozen=True, slots=True)
+class EncoderReading:
+    """Cumulative wheel encoder counts (signed)."""
+
+    left: int = 0
+    right: int = 0
+
+
 @dataclass(frozen=True, slots=True)
 class SensorFrame:
     """Everything the robot's software may know at one control tick.
 
-    Milestone 1 carries only the clock. Sensors arrive in milestone 2; the
-    frame is the *only* channel through which simulator state reaches the
-    robot's software.
+    ``lidar`` holds a scan only if one completed since the previous frame,
+    so every scan is delivered exactly once; software that needs the latest
+    scan between deliveries keeps it.
     """
 
     time: float
     """Simulation time [s]."""
+    encoders: EncoderReading = EncoderReading()
+    bumper: BumperReading = BumperReading()
+    lidar: LidarScan | None = None

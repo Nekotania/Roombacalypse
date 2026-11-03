@@ -1,4 +1,4 @@
-"""Smoke test of the pygame front-end, rendered offscreen (SDL dummy video driver)."""
+"""Smoke tests of the pygame front-end and the CLI, rendered offscreen (SDL dummy video driver)."""
 
 from __future__ import annotations
 
@@ -8,21 +8,27 @@ import pygame
 import pytest
 
 from roombacalypse.app import main
-from roombacalypse.autonomy.teleop import TeleopController
+from roombacalypse.autonomy.brain import Mode, RobotBrain
 from roombacalypse.core.config import AppConfig
+from roombacalypse.core.events import EventLog
 from roombacalypse.core.paths import resolve_room_path
 from roombacalypse.environment.rooms import load_room
 from roombacalypse.simulation.engine import Simulation
 from roombacalypse.visualization.viewer import Viewer
 
 
-def test_viewer_runs_drives_and_saves_screenshot(tmp_path: Path) -> None:
+def _viewer(mode: Mode = Mode.MANUAL) -> tuple[Viewer, Simulation, RobotBrain]:
     config = AppConfig()
-    teleop = TeleopController(config.teleop)
-    sim = Simulation(config, load_room(resolve_room_path("studio")), teleop)
-    viewer = Viewer(sim, teleop, config.viewer, offscreen=True)
+    events = EventLog()
+    brain = RobotBrain(config, publish=events.publisher("robot"), mode=mode)
+    sim = Simulation(config, load_room(resolve_room_path("studio")), brain, events=events)
+    return Viewer(sim, brain, config.viewer, offscreen=True), sim, brain
+
+
+def test_viewer_runs_drives_and_saves_screenshot(tmp_path: Path) -> None:
+    viewer, sim, brain = _viewer()
     try:
-        teleop.set_intent(-1.0, 0.0)  # back out of the dock
+        brain.teleop.set_intent(-1.0, 0.0)  # back out of the dock
         viewer.run_frames(60)  # one second of frames at x1 speed
         assert 1.0 - 2 * sim.dt <= sim.time <= 1.0 + 1e-9  # the accumulator may hold back one step
         assert sim.robot.odometer > 0.2
@@ -34,6 +40,21 @@ def test_viewer_runs_drives_and_saves_screenshot(tmp_path: Path) -> None:
         viewer.close()
 
 
+def test_autonomous_rendering_with_all_layers(tmp_path: Path) -> None:
+    viewer, sim, brain = _viewer(Mode.AUTONOMOUS)
+    try:
+        viewer.show_lidar = viewer.show_nav = viewer.show_belief = True
+        viewer.speed_index = 7  # x16
+        viewer.run_frames(60)  # ~16 simulated seconds
+        assert sim.time > 10.0
+        assert sim.robot.odometer > 1.0  # it drove itself
+        assert brain.wander.goals_chosen > 0 and sim.last_scan is not None
+        assert viewer.coverage.fraction > 0.0
+        assert viewer.save_screenshot(tmp_path / "auto.png").stat().st_size > 10_000
+    finally:
+        viewer.close()
+
+
 def _post(event_type: int, **attributes: object) -> None:
     pygame.event.post(pygame.event.Event(event_type, **attributes))
 
@@ -41,10 +62,7 @@ def _post(event_type: int, **attributes: object) -> None:
 def test_interactive_controls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Drive the mouse/keyboard code paths that offscreen rendering normally skips."""
     monkeypatch.chdir(tmp_path)  # F12 writes screenshots into ./out
-    config = AppConfig()
-    teleop = TeleopController(config.teleop)
-    sim = Simulation(config, load_room(resolve_room_path("studio")), teleop)
-    viewer = Viewer(sim, teleop, config.viewer, offscreen=True)
+    viewer, sim, brain = _viewer()
     try:
         viewer.read_keyboard = True
         monkeypatch.setattr(pygame.mouse, "get_focused", lambda: True)
@@ -66,17 +84,29 @@ def test_interactive_controls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
         viewer.run_frames(1)
         assert len(sim.world.obstacles) == before
 
-        # Keyboard: pause + single step, speed up/down, cycle tool, toggles, refit, Tab, screenshot.
+        # Keyboard: pause + single step, speed up/down, cycle tool, layers, refit, screenshot.
         tick = sim.tick
         speed_index = viewer.speed_index
-        for key in (pygame.K_SPACE, pygame.K_n, pygame.K_EQUALS, pygame.K_MINUS, pygame.K_o,
-                    pygame.K_t, pygame.K_h, pygame.K_0, pygame.K_TAB, pygame.K_F12):
+        layers = (viewer.show_lidar, viewer.show_nav, viewer.show_belief)
+        for key in (pygame.K_SPACE, pygame.K_n, pygame.K_EQUALS, pygame.K_MINUS, pygame.K_o, pygame.K_t,
+                    pygame.K_h, pygame.K_0, pygame.K_l, pygame.K_g, pygame.K_e, pygame.K_F12):
             _post(pygame.KEYDOWN, key=key, mod=0)
         viewer.run_frames(1)
         assert viewer.paused and sim.tick == tick + 1
         assert viewer.speed_index == speed_index
         assert viewer.template_index == 1 and not viewer.show_trail and viewer.show_help
+        assert (viewer.show_lidar, viewer.show_nav, viewer.show_belief) == tuple(not v for v in layers)
         assert list((tmp_path / "out").glob("screenshot-*.png"))
+
+        # Tab hands control to the robot and back; the robot's odometry survives the switch.
+        _post(pygame.KEYDOWN, key=pygame.K_SPACE, mod=0)
+        _post(pygame.KEYDOWN, key=pygame.K_TAB, mod=0)
+        viewer.run_frames(30)
+        assert brain.mode is Mode.AUTONOMOUS
+        odometry_before = brain.odometry.distance
+        _post(pygame.KEYDOWN, key=pygame.K_TAB, mod=0)
+        viewer.run_frames(1)
+        assert brain.mode is Mode.MANUAL and brain.odometry.distance >= odometry_before
 
         scale = viewer.camera.scale
         _post(pygame.MOUSEWHEEL, x=0, y=2)
@@ -86,7 +116,7 @@ def test_interactive_controls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
         seed = sim.seed
         _post(pygame.KEYDOWN, key=pygame.K_r, mod=pygame.KMOD_SHIFT)
         viewer.run_frames(1)
-        assert sim.seed == seed + 1 and sim.tick == 0
+        assert sim.seed == seed + 1 and sim.tick <= 1 and viewer.coverage.fraction < 0.05
 
         _post(pygame.KEYDOWN, key=pygame.K_ESCAPE, mod=0)
         viewer.run_frames(1)
@@ -97,10 +127,17 @@ def test_interactive_controls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
 
 def test_cli_screenshot_mode(tmp_path: Path) -> None:
     target = tmp_path / "cli.png"
-    assert main(["--room", "test_chamber", "--screenshot", str(target), "--frames", "3"]) == 0
+    assert main(["--room", "test_chamber", "--mode", "auto", "--screenshot", str(target), "--frames", "3"]) == 0
     assert target.is_file()
+
+
+def test_cli_headless_run(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["--headless", "--duration", "20", "--room", "test_chamber", "--seed", "3"]) == 0
+    output = capsys.readouterr().out
+    assert "coverage" in output and "penetration     none" in output
 
 
 def test_cli_reports_bad_config() -> None:
     assert main(["--set", "robot.radius=-1", "--screenshot", "unused.png"]) == 2
     assert main(["--room", "no_such_room", "--screenshot", "unused.png"]) == 2
+    assert main(["--headless", "--duration", "0"]) == 2

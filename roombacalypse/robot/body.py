@@ -37,9 +37,9 @@ class RobotBody:
     v_right: float = 0.0
     """Right wheel surface speed [m/s]."""
     travel_left: float = 0.0
-    """Cumulative left wheel rolling distance [m]; what wheel encoders will count."""
+    """Cumulative left wheel rotation in nominal metres (angle × nominal radius); what the encoders count."""
     travel_right: float = 0.0
-    """Cumulative right wheel rolling distance [m]."""
+    """Cumulative right wheel rotation in nominal metres."""
     linear_velocity: float = 0.0
     """Actual forward speed over the last step, after collisions [m/s]."""
     angular_velocity: float = 0.0

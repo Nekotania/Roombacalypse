@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import pytest
 
 from roombacalypse.core.config import RobotSpec
 from roombacalypse.core.geometry import Pose2D, angle_difference
 from roombacalypse.core.kinematics import (
     arc_displacement,
+    arc_displacement_array,
     integrate_twist,
     integrate_wheel_travel,
     twist_to_wheel_speeds,
@@ -78,6 +80,14 @@ def test_series_branch_is_continuous() -> None:
     assert below[0] == pytest.approx(above[0], rel=1e-12)
     assert below[1] == pytest.approx(above[1], rel=1e-6)  # closed form has ~1e-8 cancellation error here
     assert arc_displacement(1.0, 0.0) == (1.0, 0.0)
+
+
+def test_vectorised_arc_matches_scalar() -> None:
+    distances = np.array([0.0, 0.3, -0.2, 1.0, 0.5])
+    turns = np.array([0.0, 1e-6, 0.99e-4, 1.2, -2.5])
+    dx, dy = arc_displacement_array(distances, turns)
+    for i in range(distances.shape[0]):
+        assert (dx[i], dy[i]) == pytest.approx(arc_displacement(float(distances[i]), float(turns[i])), abs=1e-15)
 
 
 def test_wheel_travel_matches_twist() -> None:
