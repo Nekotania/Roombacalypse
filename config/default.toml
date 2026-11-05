@@ -91,6 +91,42 @@ turn_max_deg = 150.0
 turn_speed = 1.5           # [rad/s]
 bump_memory_seconds = 20.0 # how long a bump location is treated as an obstacle [s]
 
+[mapping]                  # the robot's log-odds occupancy grid (belief)
+resolution = 0.05          # cell size [m]
+hit_log_odds = 0.85        # added where a beam ended (p = 0.70 for one hit)
+miss_log_odds = -0.4       # added where a beam passed through (p = 0.40 for one miss)
+min_log_odds = -2.0        # clamps, so moved furniture can be forgotten / reappear
+max_log_odds = 3.5
+occupied_log_odds = 0.6    # above: occupied (p > 0.65)
+free_log_odds = -0.6       # below: free (p < 0.35)
+
+[slam]                     # graph SLAM (docs/algorithms/slam.md)
+node_distance = 0.25       # new keyframe after this much travel [m]...
+node_angle_deg = 15.0      # ...or this much rotation
+local_map_nodes = 20       # recent keyframes forming the local map new scans are matched against
+scan_voxel = 0.04          # scans thinned to one point per voxel before matching [m]
+field_resolution = 0.025   # likelihood-field cell for scan matching [m]
+field_sigma = 0.05         # likelihood-field width around mapped points [m]
+track_min_score = 0.5      # mean likelihood a tracking match needs; else a wider search
+track_window = 0.25        # wider (fallback) search window: translation half-width [m]
+track_window_deg = 8.0     # ...and rotation half-width
+prior_translation_weight = 0.5  # pull of the odometry prediction [1/m^2] (matters in corridors)
+prior_rotation_weight = 0.5     # [1/rad^2]
+match_point_std = 0.01     # aligned scan points lie this far from mapped surfaces [m]; scales match information
+odometry_translation_noise = 0.03  # the robot's own wheel model: std per metre [m/m]
+odometry_rotation_noise = 0.03     # heading std per radian turned [rad/rad]
+odometry_heading_drift = 0.015     # heading std per metre travelled [rad/m]
+loop_search_radius = 2.5   # old keyframes this close are loop-closure candidates [m]
+loop_min_travel = 5.0      # ...if at least this much travel back along the trajectory [m]
+loop_interval = 2.0        # travel between loop-closure attempts [m]
+loop_chain_nodes = 10      # keyframes each side of the nearest candidate form the reference map
+loop_window = 0.5          # loop-closure search half-width, translation [m]
+loop_window_deg = 12.0     # ...and rotation [deg]
+loop_min_score = 0.6       # mean likelihood a loop closure needs
+loop_max_ambiguity = 0.9   # reject if a clearly different pose scores this fraction of the best
+loop_robust_scale = 2.0    # Cauchy kernel on loop closures [standard deviations]
+optimizer_iterations = 15  # Levenberg-Marquardt iterations per pose-graph optimisation
+
 [viewer]
 width = 1280               # window size [px]
 height = 800

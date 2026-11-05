@@ -1,6 +1,6 @@
 # Roadmap
 
-Status as of 2026-11-03. Each milestone ends with: all tests green,
+Status as of 2026-11-05. Each milestone ends with: all tests green,
 earlier functionality re-verified, documentation updated, and a written
 report. A milestone is not "done" until its acceptance criteria are
 demonstrated by tests or recorded runs.
@@ -9,8 +9,8 @@ demonstrated by tests or recorded runs.
 |---|---|---|---|
 | **M1** | *It moves* | room geometry, differential-drive robot, collisions, manual control, viewer | ✅ done |
 | **M2** | *It sees* | LiDAR, bumper, encoders, drive errors, DWA obstacle avoidance, autonomous exploration, headless runner, events | ✅ done |
-| **M3** | *It knows where it is* | occupancy grid mapping, particle-filter localization, SLAM coupling, map/pose metrics | ⏭ next (needs D7) |
-| **M4** | *It has a plan* | costmap, A\*, coverage planning, executive state machine, stuck detection and recovery | planned |
+| **M3** | *It knows where it is* | graph SLAM (scan matching, pose graph, loop closure), occupancy grid, multi-room apartment, map/pose metrics | ✅ done |
+| **M4** | *It has a plan* | costmap, A\*, coverage planning, executive state machine, stuck detection and recovery | ⏭ next |
 | **M5** | *It cleans and comes home* | dirt and vacuum, battery and power, energy-aware return, docking, recharge and resume | planned |
 | **M6** | *It has feelings* | personality system, statistics, polished visualization | planned |
 | **M7** | *It ships* | documentation, benchmarks, release preparation | planned |
@@ -25,7 +25,8 @@ M1 ──► M2 ──► M3 ──► M4 ──► M5 ──► M7
 
 - **M2** needs M1's engine and geometry (raycasting reads the same shapes).
 - **M3** needs M2's LiDAR and encoders, plus the evaluation harness that compares belief with truth (now in place).
-- **M4** plans in M3's map frame using M3's pose estimate, and reuses M2's DWA as its local planner.
+- **M4** plans in M3's map frame using M3's pose estimate (`brain.pose`, `brain.slam.grid`), and reuses M2's
+  DWA as its local planner.
 - **M5** needs M4's planner (to get home) and executive (to decide when).
 - **M6** can start now: M2 publishes events. Its best material
   (getting stuck, near-empty battery) comes from M4 and M5.
@@ -106,34 +107,113 @@ acceptance run and is now covered by a test:
 - **DWA's local minimum in front of a pillar.** Fixed with mean-clearance
   scoring and the intrusion penalty.
 
-## M3: It knows where it is (next)
+## M3: It knows where it is ✅
 
-**Prerequisite:** the director confirms decision D7 (SLAM strategy;
-ARCHITECTURE §16).
+**Decision D7** (the SLAM strategy) was delegated by the director with one
+requirement, "something that works in actual robotics, not just simulations".
+Chosen: graph SLAM in the Karto / slam_toolbox / Cartographer family, because
+it can correct mapped errors through loop closure. Rationale in ARCHITECTURE
+§16; algorithm note: [algorithms/slam.md](algorithms/slam.md).
 
-**Deliverables**
+**Delivered**
 
-- `mapping/`: log-odds occupancy grid, inverse sensor model, vectorized ray tracing.
-- `localization/`: particle filter with odometry motion model, likelihood field,
-  low-variance resampling and an effective-sample-size trigger.
-- SLAM coupling behind a `Slam` interface.
-- Evaluation: absolute trajectory error and map precision/recall against ground truth.
-- Overlays: map (`M`), particles (`P`), estimated versus true pose.
-- The wander behaviour switches from odometry to the localized pose, so its
-  novelty memory stops smearing.
+- `mapping/`:
+  - a log-odds occupancy grid with vectorized ray tracing, one update per cell
+    per scan, clamping and growth;
+  - surface fields: a coarse likelihood grid, plus line and point surface
+    elements fitted by PCA;
+  - a sparse Levenberg-Marquardt pose-graph optimizer with a Cauchy kernel.
+- `localization/`:
+  - correlative scan matching with two-level branch and bound;
+  - point-to-line ICP refinement with ICP information and an ambiguity check;
+  - `GraphSlam` behind a `Slam` protocol:
+    - keyframes, and a per-scan wheel-slip check;
+    - a local map;
+    - loop closure with verification, then re-optimization.
+- **The robot uses it.** `RobotBrain` runs SLAM in every mode. Wander's goals and
+  visit counter use the map-frame pose; reflexes keep odometry (the `map → odom`
+  split, D17). Loop closures and lost scans publish `map` events.
+- **A multi-room apartment** (`config/rooms/apartment.toml`, asked for by the
+  director): six spaces off a 10 m hallway, with a 13 m loop through living
+  room and kitchen.
+- **Evaluation:** online and keyframe trajectory error (anchored at the dock,
+  plus aligned ATE) and map precision/recall in the headless scorecard.
+- **Viewer:**
+  - `M` (map, drawn where it really is), on by default;
+  - `P` (pose graph and loop closures);
+  - `E` now shows the SLAM ghost next to the odometry ghost;
+  - a SLAM section in the panel.
+- **Tests:** 375 fast (about 30 s on the development container) plus 15 acceptance runs (`pytest -m slow`,
+  about 8 minutes). Ruff and mypy are clean.
 
-**Acceptance criteria**
+**Acceptance criteria and measured results.** 10 simulated minutes of
+autonomy, default noise, seeds 1–5, each run scored once against both the M2
+and the M3 criteria:
 
-- Unit tests for the grid update, motion model statistics, sensor model,
-  resampling, and global localization convergence in a known map.
-- After 10 minutes of wandering with default noise, against today's
-  dead-reckoning baseline of up to 8.6 m and 153°:
-  - map precision ≥ 0.95 and recall ≥ 0.85 on occupied cells;
-  - RMS absolute trajectory error < 5 cm.
+| Criterion | Test Chamber: threshold / measured | Studio: threshold / measured | Apartment: threshold / measured |
+|---|---|---|---|
+| SLAM pose error, online RMS | ≤ 1.5 cm / 0.3–0.5 cm | ≤ 2.5 cm / 0.5–1.4 cm | ≤ 8 cm / 2.9–5.3 cm |
+| SLAM pose error, online max | ≤ 4 cm / 1.0–1.4 cm | ≤ 6 cm / 1.8–2.9 cm | ≤ 15 cm / 6.9–9.2 cm |
+| keyframe ATE RMS (anchored at the dock) | ≤ 1.5 cm / 0.3–0.5 cm | ≤ 3 cm / 0.5–1.6 cm | ≤ 8 cm / 2.6–5.7 cm |
+| keyframe ATE RMS, aligned | ≤ 1 cm / 0.2 cm | ≤ 1.5 cm / 0.4–0.5 cm | ≤ 4 cm / 1.6–2.8 cm |
+| map precision (no phantom obstacles) | ≥ 98 % / 99.9–100 % | ≥ 98 % / 99.9–100 % | ≥ 93 % / 95.6–99.8 % |
+| map recall | ≥ 90 % / 95.7–97.1 % | ≥ 85 % / 89.3–92.0 % | ≥ 82 % / 86.8–92.0 % |
+| loop closures | > 0 / 66–72 | > 0 / 68–71 | > 0 / 54–59 |
+| dead reckoning, for comparison | / 0.3–3.6 m | / 0.7–5.2 m | / 0.8–11.3 m |
+| M2: penetration; contacts with LiDAR-visible things | none; 0 / none; 0 | none; 0 / none; 0 | none; 0 / none; 0 |
+| M2: accessible floor swept | ≥ 70 % / 80–84 % | ≥ 60 % / 68–73 % | ≥ 35 % / 42–55 % |
+| M2: bump rate | ≤ 0.2/min / 0 | ≤ 1.2/min / 0.4–0.8 | ≤ 1.2/min / 0.3–0.8 |
+| M2: distance driven | ≥ 120 m / ~162 m | ≥ 120 m / ~159 m | ≥ 120 m / ~151 m |
 
-  These are targets; final thresholds will be set from measured runs and
-  justified in the docs.
-- Failure modes documented honestly (no loop closure).
+Against the targets set before M3:
+
+- **ATE < 5 cm:** met with wide margins in the chamber and studio (≤ 1.6 cm);
+  in the apartment 4 of 5 seeds (seed 5: 5.7 cm).
+- **Precision ≥ 0.95:** met everywhere.
+- **Recall ≥ 0.85:** met everywhere.
+
+The apartment's absolute error is almost entirely a small rotation of the
+map about the dock (about 0.5°), picked up crossing the hallway. The map
+itself is consistent (aligned ATE ≤ 2.8 cm), and errors near the dock stay
+under 2 cm. The apartment thresholds are therefore set from its own
+measurements, as agreed for the stress test.
+
+Map precision counts *phantom obstacles*: occupied cells in free space more
+than a cell from any surface. Strict surface precision, which also counts
+the harmless thickening of surfaces into solid matter, is 73–89 %; see
+algorithms/slam.md, "Evaluation", and decision D19.
+
+**Found and fixed during M3.** Most were found by asking why a number was not
+as good as it should be. Details in algorithms/slam.md:
+
+- **Sub-cell accuracy.** Matching against cell centres limited a match to
+  ±1 cell. Point-to-line surface elements fixed it: perfect-sensor keyframe
+  error fell from 14.6 mm to 3.3 mm.
+- **A quartic cost and fake information.** It reported more information
+  *along* a corridor than across it.
+- **A chiral sampling bias.** Surfaces sat half a step clockwise around the
+  sensor: −0.005° per keyframe, the same sign on every seed.
+- **Noisy pairwise normals, a stalling solver and a V-shaped point residual.**
+  Together they left 6.7 % of each odometry heading error in every match.
+  The tell was an even/odd effect in the iteration count.
+- **Fake point features along walls.** Lone far returns and blurred far walls
+  pinned a corridor along its length.
+- **A branch-and-bound border bug.** Blocks just outside the field were
+  bounded by 0. A property test found it.
+- **Phantom travel.** Spinning wheels against a wall let the pose run 22 cm
+  ahead. A per-scan slip check now holds it to one scan period.
+- **Wrong test expectations.** Several first-draft expectations were wrong,
+  and the tests now state the measured behaviour. For example, ICP converges
+  from 45 cm off, not 5 cm, and one scan does not yet mark free space (p = 0.40).
+
+**Limitations (honest):**
+
+- no global relocalization: a kidnapped robot stays lost;
+- loop closure searches ±0.5 m and ±12°;
+- absolute error grows across long corridors until a loop closes;
+- a map re-render costs about 1 ms per keyframe;
+- a static-world assumption;
+- one session (maps are not saved).
 
 ## M4: It has a plan
 
@@ -201,8 +281,8 @@ ARCHITECTURE §16).
 
 | # | Risk | Affects | Likelihood | Mitigation / status |
 |---|---|---|---|---|
-| R1 | SLAM drift or map corruption (no loop closure) | M3–M5 | medium | apartment-scale rooms, 360° LiDAR; insert scans only when the filter is confident; known-pose diagnostic mode for tests; trajectory-error metric; RBPF as an upgrade path |
-| R2 | Python too slow at high speed factors | all | low (measured) | M2 runs at about 90× real time headless with LiDAR + DWA; M3's particle filter will be vectorized and profiled |
+| R1 | SLAM drift or map corruption | M3–M5 | low (measured) | graph SLAM with verified loop closures and a robust kernel; scans that do not fit stay out of the map; measured 0.3–1.6 cm ATE (studio, chamber), 2.6–5.7 cm (apartment). Remaining: heading drift across corridors (a gyro would bound it), no global relocalization |
+| R2 | Python too slow at high speed factors | all | low (measured) | M2 ran at about 50–90× real time headless; with SLAM, about 20× on the development container (SLAM costs ~15–20 s per simulated 10 minutes, profiled and vectorized) |
 | R3 | DWA local minima and oscillation | M2, M4 | medium (reduced) | M2 fixed the pillar minimum and margin deadlocks; U-traps remain; M4's A\* path and recovery ladder |
 | R4 | Docking precision limited by localization error | M5 | medium | infrared beacon for the final approach; tolerance-based contact model |
 | R5 | Coverage near walls and under furniture limited by safety margins | M4, M5 | high (by design) | coverage measured against the *accessible* floor (implemented); later, a wall-following edge pass |
@@ -211,13 +291,21 @@ ARCHITECTURE §16).
 | R8 | Scope creep in polish and personality | schedule | medium | milestone gates; personality is observer-only |
 | R9 | Movable obstacles invalidate the map | M3, M4 | medium | log-odds clamping; replanning on map change; recovery |
 | R10 | Simplified pushing (no rotation, no chain pushes) is visible to users | realism | low | documented; upgrade path in the contact solver |
-| R11 | Odometry drift makes M2's novelty memory smear in long runs | M2 | certain (accepted) | documented; M3 replaces odometry with the localized pose |
+| R11 | Odometry drift makes M2's novelty memory smear in long runs | M2 | resolved (M3) | the visit counter now lives in the SLAM map frame |
+| R12 | Map re-rendering cost grows with keyframes (≈1 ms each) | M4+ | medium | lazy, throttled re-render today; Cartographer-style submaps if hour-long runs need it |
+| R13 | Kidnapping or a large slip leaves the robot lost | M4, M5 | low in simulation | lost scans are detected and kept out of the map; global relocalization belongs to M4's recovery ladder |
 
 ## Open questions for the project director
 
-1. **D7, the SLAM strategy (needed before M3):** confirm "particle-filter
-   localization against the robot's own growing map" (recommended), or choose
-   the heavier Rao-Blackwellized variant.
-2. **Scenarios:** any must-have rooms? For example, a multi-room apartment with
-   doorways, a "furniture gauntlet" for recovery tests, or stairs with cliff sensors.
+1. ~~D7, the SLAM strategy~~: delegated by the director; graph SLAM chosen (see M3).
+2. ~~Scenarios~~: a multi-room apartment was added in M3. More rooms (a
+   "furniture gauntlet" for M4's recovery tests, stairs with cliff sensors)
+   remain possible.
 3. ~~Licence~~: MIT, confirmed (D13).
+4. **New: a gyroscope?** Every real robot vacuum fuses one with its wheel
+   odometry, and the apartment's remaining error is mostly heading drift
+   across the hallway. Adding a simulated gyro (with bias drift) and a heading
+   constraint in the pose graph is cheap and would likely halve that error.
+   Proposed for M4 unless you prefer to keep the sensor set minimal.
+5. **New: global relocalization** (a kidnapped robot, or one switched on away
+   from its dock) fits M4's recovery ladder. Confirm it belongs there.

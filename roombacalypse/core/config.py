@@ -261,6 +261,112 @@ class WanderConfig:
 
 
 @dataclass(frozen=True)
+class MappingConfig:
+    """Log-odds occupancy grid the robot builds from its scans (see docs/algorithms/slam.md)."""
+
+    resolution: float = 0.05
+    """Cell size [m]."""
+    hit_log_odds: float = 0.85
+    """Added to a cell a beam ended in (p = 0.70 for a single hit)."""
+    miss_log_odds: float = -0.4
+    """Added to a cell a beam passed through (p = 0.40 for a single miss)."""
+    min_log_odds: float = -2.0
+    """Clamp: a cell never becomes more certainly free than this, so moved furniture can reappear."""
+    max_log_odds: float = 3.5
+    """Clamp: a cell never becomes more certainly occupied than this, so moved furniture can be forgotten."""
+    occupied_log_odds: float = 0.6
+    """Cells above this count as occupied (p > 0.65)."""
+    free_log_odds: float = -0.6
+    """Cells below this count as free (p < 0.35)."""
+
+    def __post_init__(self) -> None:
+        _require(0.005 <= self.resolution <= 0.5, "mapping.resolution must be in [0.005, 0.5]")
+        _require(self.hit_log_odds > 0.0 > self.miss_log_odds, "mapping needs hit_log_odds > 0 > miss_log_odds")
+        _require(self.min_log_odds < 0.0 < self.max_log_odds, "mapping needs min_log_odds < 0 < max_log_odds")
+        _require(
+            self.min_log_odds < self.free_log_odds < 0.0 < self.occupied_log_odds < self.max_log_odds,
+            "mapping needs min_log_odds < free_log_odds < 0 < occupied_log_odds < max_log_odds",
+        )
+
+
+@dataclass(frozen=True)
+class SlamConfig:
+    """Graph SLAM: scan matching, keyframes, loop closure, pose-graph optimisation (docs/algorithms/slam.md).
+
+    Odometry noise figures are the robot's *own* model of its wheels, the kind
+    of number a robot is tuned with; they are not the simulator's hidden errors.
+    """
+
+    node_distance: float = 0.25
+    """A new keyframe is added after this much travel [m]..."""
+    node_angle_deg: float = 15.0
+    """...or this much rotation [deg]."""
+    local_map_nodes: int = 20
+    """Recent keyframes whose scans form the local map that new scans are matched against."""
+    scan_voxel: float = 0.04
+    """Scans are thinned to one point per voxel of this size before matching [m]."""
+    field_resolution: float = 0.025
+    """Cell size of the likelihood fields used for scan matching [m]."""
+    field_sigma: float = 0.05
+    """Width of the likelihood field around mapped points [m]."""
+    track_min_score: float = 0.5
+    """Mean likelihood a tracking match needs; below it the robot falls back to a wider search."""
+    track_window: float = 0.25
+    """Half-width of the fallback search window, translation [m]."""
+    track_window_deg: float = 8.0
+    """Half-width of the fallback search window, rotation [deg]."""
+    prior_translation_weight: float = 0.5
+    """Pull of the odometry prediction on the match [1/m²]; matters only where the scan is ambiguous (corridors)."""
+    prior_rotation_weight: float = 0.5
+    """Pull of the odometry prediction on the match heading [1/rad²]."""
+    match_point_std: float = 0.01
+    """How far the points of an aligned scan typically lie from the mapped surfaces [m]; the information of a
+    scan-matching constraint is the points' normal structure divided by this squared."""
+    odometry_translation_noise: float = 0.03
+    """Odometry translation std per metre travelled [m/m]."""
+    odometry_rotation_noise: float = 0.03
+    """Odometry heading std per radian turned [rad/rad]."""
+    odometry_heading_drift: float = 0.015
+    """Odometry heading std per metre travelled (unequal wheels) [rad/m]."""
+    loop_search_radius: float = 2.5
+    """Old keyframes within this distance of the current estimate are loop-closure candidates [m]."""
+    loop_min_travel: float = 5.0
+    """Candidates must lie at least this much travel back along the trajectory [m]."""
+    loop_interval: float = 2.0
+    """Travel between loop-closure attempts [m]."""
+    loop_chain_nodes: int = 10
+    """Keyframes on each side of the nearest candidate that form the reference map for a loop closure."""
+    loop_window: float = 0.5
+    """Half-width of the loop-closure search window, translation [m]."""
+    loop_window_deg: float = 12.0
+    """Half-width of the loop-closure search window, rotation [deg]."""
+    loop_min_score: float = 0.6
+    """Mean likelihood a loop closure needs."""
+    loop_max_ambiguity: float = 0.9
+    """Reject a loop closure if a clearly different pose scores this fraction of the best one (corridors,
+    symmetric rooms)."""
+    loop_robust_scale: float = 2.0
+    """Cauchy kernel scale on loop-closure constraints, in standard deviations."""
+    optimizer_iterations: int = 15
+    """Maximum Levenberg-Marquardt iterations per pose-graph optimisation."""
+
+    def __post_init__(self) -> None:
+        _require(self.node_distance > 0.0 and self.node_angle_deg > 0.0, "slam node thresholds must be positive")
+        _require(self.local_map_nodes >= 1 and self.loop_chain_nodes >= 1, "slam node counts must be >= 1")
+        _require(0.0 < self.scan_voxel < 0.5, "slam.scan_voxel must be in (0, 0.5)")
+        _require(0.0 < self.field_resolution <= self.field_sigma, "slam needs 0 < field_resolution <= field_sigma")
+        for name in ("track_min_score", "loop_min_score", "loop_max_ambiguity"):
+            _require(0.0 < getattr(self, name) < 1.0, f"slam.{name} must be in (0, 1)")
+        for name in ("track_window", "track_window_deg", "loop_window", "loop_window_deg", "match_point_std",
+                     "loop_search_radius", "loop_interval", "loop_robust_scale"):
+            _require(getattr(self, name) > 0.0, f"slam.{name} must be positive")
+        for name in ("prior_translation_weight", "prior_rotation_weight", "odometry_translation_noise",
+                     "odometry_rotation_noise", "odometry_heading_drift", "loop_min_travel"):
+            _require(getattr(self, name) >= 0.0, f"slam.{name} must be >= 0")
+        _require(self.optimizer_iterations >= 1, "slam.optimizer_iterations must be >= 1")
+
+
+@dataclass(frozen=True)
 class DockConfig:
     """Geometry of the charging station."""
 
@@ -354,6 +460,8 @@ class AppConfig:
     teleop: TeleopConfig = field(default_factory=TeleopConfig)
     dwa: DwaConfig = field(default_factory=DwaConfig)
     wander: WanderConfig = field(default_factory=WanderConfig)
+    mapping: MappingConfig = field(default_factory=MappingConfig)
+    slam: SlamConfig = field(default_factory=SlamConfig)
     viewer: ViewerConfig = field(default_factory=ViewerConfig)
 
     def __post_init__(self) -> None:

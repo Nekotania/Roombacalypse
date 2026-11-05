@@ -1,6 +1,6 @@
 # ROOMBACALYPSE architecture
 
-> **Status:** living document, revised at every milestone. **Milestones 1 and 2
+> **Status:** living document, revised at every milestone. **Milestones 1–3
 > are implemented**; sections about later milestones describe the *intended*
 > design and are marked **(planned, Mx)**. They will be rewritten from the
 > actual implementation when that milestone is built and tested.
@@ -85,8 +85,8 @@ roombacalypse/
 ├── simulation/     truth     clock, contact solver, Simulation engine
 ├── cleaning/       truth     (M5) dirt field, vacuum pickup, cleaning metrics
 ├── battery/        truth     (M5) battery cell and power model
-├── mapping/        belief    (M3) occupancy grid, inverse sensor model
-├── localization/   belief    wheel odometry [M2]; (M3) particle filter
+├── mapping/        belief    occupancy grid, surface fields, pose-graph optimiser [M3]
+├── localization/   belief    wheel odometry [M2]; scan matching, graph SLAM [M3]
 ├── planning/       belief    (M4) costmap, A*, coverage planner
 ├── navigation/     belief    obstacle memory, DWA local planner [M2]; (M4) path following; (M5) docking
 ├── autonomy/       belief    RobotBrain, teleop, wander behaviour [M2]; (M4) executive, recovery
@@ -162,7 +162,10 @@ personality (M4+).
 - **Odometry frame O** (belief): origin at the robot's boot pose on the dock.
   The robot's goals and remembered obstacles live here. The viewer draws
   belief in the world through the true boot pose, which is how drift becomes visible.
-- **Map frame M** (belief, M3): the same origin as O, corrected by localization.
+- **Map frame M** (belief, M3): the same origin as O; SLAM's estimate is
+  `pose_M = correction ∘ pose_O`, the `map → odom` split of ROS. Odometry stays
+  smooth (obstacle memory, bump reflexes); the map frame jumps millimetres at
+  keyframes and centimetres at loop closures (exploration goals, visit counter).
 - **Screen frame S:** pixels, y down. Only `visualization/camera.py` converts W↔S.
 - **Grids:** `(row, col) = (iy, ix)`; cell centres at `origin + (i + 0.5) · resolution`.
 
@@ -233,6 +236,8 @@ Details: [`algorithms/lidar.md`](algorithms/lidar.md), [`algorithms/odometry.md`
 the `Controller` protocol and owns everything the robot *knows*:
 
 - dead-reckoned odometry;
+- SLAM (M3): the map, the pose graph and the map-frame pose, updated in every
+  mode, so the map keeps growing while a human drives;
 - the obstacle memory: the latest scan, plus recent bump locations;
 - bump edge detection;
 - the robot's own seeded random stream.
@@ -261,23 +266,29 @@ any state → RECOVERING → back to previous state | TRAPPED
 any state ⇄ MANUAL (user override)
 ```
 
-### 10.2 Mapping and localization (planned, M3; see decision D7)
+### 10.2 Mapping and localization (implemented, M3; decision D7)
 
-- **Occupancy grid:** log-odds cells (5 cm). The inverse sensor model traces
-  free space along each beam with vectorized sampling, de-duplicated per scan.
-  Log-odds are clamped so moved furniture can be forgotten.
-- **Localization:** Monte Carlo localization, a particle filter. It uses
-  the odometry motion model (Thrun, Burgard & Fox, *Probabilistic Robotics*,
-  §5.4) and a likelihood-field sensor model on a distance transform
-  (`scipy.ndimage.distance_transform_edt`). Low-variance resampling is triggered
-  by the effective sample size. The pose estimate is the weighted mean, with a
-  circular mean for θ.
-- **SLAM coupling (recommended):** the filter localizes against the robot's own
-  incrementally built map, and the map is updated with the estimated pose
-  whenever the filter is confident.
-- **Evaluation:** absolute trajectory error against ground truth (M2 already
-  measures the dead-reckoning baseline: up to metres and tens of degrees per
-  10 minutes), and map precision/recall against a rasterization of the true world.
+Graph SLAM in the Karto / slam_toolbox / Cartographer family. Full write-up,
+derivations and measured results: [`algorithms/slam.md`](algorithms/slam.md).
+
+- **Front end.** Odometry predicts; a keyframe is added after 0.25 m or 15°, or
+  as soon as a scan stops fitting the prediction (wheel slip). Its scan is
+  matched against the surfaces of the last 20 keyframes with point-to-line ICP
+  (a correlative search with branch and bound if the fit is poor), and joined
+  to the previous keyframe by a constraint carrying the match's information
+  plus the odometry noise model.
+- **Back end.** Every 2 m, the newest keyframe is matched against an earlier
+  visit nearby (correlative search ±0.5 m, ±12°). A strong, unambiguous match
+  not on the window's edge becomes a loop-closure constraint with a Cauchy
+  kernel, and the sparse pose graph is re-optimised (Levenberg-Marquardt, node 0
+  fixed at the dock).
+- **Map.** A 5 cm log-odds occupancy grid rendered from the keyframes:
+  incrementally, and from scratch (lazily) after a loop closure moved them.
+- **Evaluation.** Online and keyframe trajectory error against ground truth
+  through the boot pose (no alignment; the aligned ATE is reported too), and
+  map precision/recall against the true scan-plane geometry.
+- **Not done:** global relocalisation (a kidnapped robot stays lost), submaps
+  for very long sessions, persistent maps.
 
 ### 10.3 Planning (planned, M4)
 
@@ -374,7 +385,11 @@ safety factor, plus a reserve. There is no fixed battery-percentage threshold.
   - L: LiDAR rays and hits, drawn from the true pose at scan time;
   - G: navigation: DWA candidate arcs (admissible and rejected), the chosen
     arc, the exploration goal;
-  - E: belief, a purple ghost where odometry thinks the robot is;
+  - E: belief, a purple ghost where odometry thinks the robot is and a green
+    one where SLAM thinks it is;
+  - M: the robot's occupancy grid, drawn through the true boot pose, so map
+    errors show as they are (on by default);
+  - P: the pose graph, keyframes and (yellow) loop closures;
   - T: the ground-truth trail.
 - **Layering follows height:** floor, then collidable obstacles, then the
   robot, then translucent overhead obstacles, then the overlays.
@@ -405,7 +420,14 @@ safety factor, plus a reserve. There is no fixed battery-percentage threshold.
   - odometry, DWA (window, admissibility property test), obstacle memory;
   - the wander state machine, the event log, footprint coverage.
 - **Closed-loop tests:** DWA with the real simulator, LiDAR and odometry around
-  a pillar and at a wall, plus a sock the LiDAR cannot see.
+  a pillar and at a wall, plus a sock the LiDAR cannot see. SLAM driven
+  through the simulator: millimetre accuracy with perfect sensors, a 10×
+  improvement over dead reckoning with a 3 % wheel-base error, loop closure
+  on a driven loop, map precision/recall, determinism, slip.
+- **SLAM unit tests:** grid updates (once per scan, clamping, growth), field
+  values and exact surface distances, branch-and-bound bounds, pose-graph
+  Jacobians and robust kernel, scan matching accuracy and its window and
+  ambiguity flags, a degenerate corridor, the evaluation metrics themselves.
 - **Property tests:**
   - 60 s of random driving never penetrates anything;
   - DWA's chosen arc is always admissible, over 200 random scenes.
@@ -413,15 +435,17 @@ safety factor, plus a reserve. There is no fixed battery-percentage threshold.
   seeds give different robots.
 - **Architecture tests:** see §2.
 - **Viewer and CLI smoke tests,** rendered offscreen, with every key binding exercised.
-- **Acceptance suite** (`pytest -m slow`, about 70 s): 10 simulated minutes of
-  autonomy × 5 seeds × 2 rooms. It asserts:
+- **Acceptance suite** (`pytest -m slow`): 10 simulated minutes of autonomy ×
+  5 seeds × 3 rooms. M2 asserts:
   - no penetration;
   - zero contacts with anything the LiDAR can see;
   - no stalls (at least 120 m driven);
   - bump-rate ceilings;
   - coverage floors.
 
-  Thresholds rather than golden numbers, set from measured runs with margin.
+  M3 adds SLAM pose error (online RMS and maximum, keyframe ATE) and map
+  precision and recall. Thresholds rather than golden numbers, set from
+  measured runs with margin.
 - **(planned, M7) Benchmarks:** seeds × rooms with matplotlib plots.
 
 ## 16. Decision log
@@ -434,7 +458,7 @@ safety factor, plus a reserve. There is no fixed battery-percentage threshold.
 | D4 | Fixed `dt`, integer-multiple rates, named RNG streams | variable `dt`; one global RNG | determinism and stable regression tests | medium |
 | D5 | Frozen dataclasses + TOML (stdlib `tomllib`) | pydantic, YAML, JSON | typed and strict with no new dependency | low |
 | D6 | Purpose-built contact solver: circle robot, projection, quasi-static pushing | pymunk / Box2D | slow robots, determinism, explainability, no dependency | medium |
-| D7 | **(to confirm before M3)** MCL against the self-built map ("scan-to-map" SLAM, no loop closure) | Rao-Blackwellized particle filter (GMapping-style); pose-graph SLAM | apartment scale with a 360° LiDAR; textbook parts; fast in NumPy | medium, if hidden behind a `Slam` interface |
+| D7 | ✅ Graph SLAM: scan-matching front end, pose graph with loop closure (Karto / slam_toolbox / Cartographer family). Chosen by the agent; the director delegated it ("something that works in actual robotics") | MCL against the self-built map (the M2 recommendation); Rao-Blackwellized particle filter (GMapping) | can correct mapped errors; what real LiDAR robots run; scales to the multi-room apartment | medium: behind the `Slam` protocol |
 | D8 | ✅ DWA local planner, window sampled in wheel space, ramp-aware prediction | vector field histogram; pure pursuit with a safety stop | honours velocity and acceleration limits natively; reused in M4 | low |
 | D9 | (M4) BA\* plus frontier exploration for coverage | cellular decomposition on a known map; spanning-tree coverage | works online while the map is still being built | medium |
 | D10 | (M5) Dirt as a density grid | individual particles | scales, simple pickup math, still renders as particles | low |
@@ -444,31 +468,33 @@ safety factor, plus a reserve. There is no fixed battery-percentage threshold.
 | D14 | ✅ One long-lived `RobotBrain` owns perception; modes only generate commands | separate controllers swapped on Tab | odometry and memory must survive mode switches, as on a real robot | low |
 | D15 | ✅ Hidden per-robot calibration errors plus correlated (OU) slip | i.i.d. per-step noise; perfect wheels | i.i.d. noise averages away; UMBmark systematic errors dominate real odometry | low |
 | D16 | ✅ Robot software writes events through a publish-only handle | no events from the robot; a shared readable log | the personality needs robot-side events; reading the log would leak truth | low |
+| D17 | ✅ `map → odom` split: SLAM corrects odometry; goals live in the map frame, reflexes and obstacle memory in the odometry frame | everything in one frame | the map frame jumps at loop closures; local control must not | low |
+| D18 | ✅ Scan matching by point-to-line ICP on fitted surface elements, correspondences from a distance-transform feature map; correlative search only for the mode | likelihood-field Gauss-Newton (Hector, Cartographer); NDT | measured: the likelihood field limited a match to ±1 cell and drifted in heading | low |
+| D19 | ✅ Map precision counts phantom obstacles in free space; thickening into solid matter is allowed up to 3 cells; the strict number is reported too | precision within one cell of a surface | every occupancy grid thickens surfaces into solid matter, where beams cannot clear it; that is harmless | low |
 
 ### D7 in more detail
 
 Running mapping and localization at the same time *is* SLAM, the hardest
-problem in the brief. The options:
+problem in the brief. Before M3 the options on the table were:
 
-- **(a) MCL against the robot's own growing map** (recommended for M3). It uses
-  one shared occupancy grid: the particle filter localizes against it, and each
-  scan is inserted at the estimated pose. This is close in spirit to Hector
-  SLAM, with a particle filter instead of Gauss–Newton scan matching.
-  - *For:* simple, fast, every part is textbook.
-  - *Against:* no loop closure. An error baked into the map is never corrected.
-    It works because an apartment is small and a 360° LiDAR keeps seeing the
-    same walls.
-- **(b) Rao-Blackwellized particle filter (GMapping-style).** Each particle
-  carries its own map.
-  - *For:* proper SLAM that can close loops.
-  - *Against:* N maps updated per scan is heavy in Python, and it is much harder to debug.
-- **(c) Pose-graph SLAM with scan matching (Karto/Cartographer-style).**
-  - *For:* the state of the art.
-  - *Against:* needs a nonlinear least-squares back end; overkill for one apartment.
+- **(a) MCL against the robot's own growing map** (the M2 recommendation): one
+  shared occupancy grid, a particle filter localises against it, and each scan
+  is inserted at the estimated pose. Simple, but an error baked into the map is
+  never corrected.
+- **(b) Rao-Blackwellized particle filter (GMapping-style):** each particle
+  carries its own map. Proper SLAM that can close loops, but heavy in Python and
+  prone to particle depletion on long loops.
+- **(c) Graph SLAM with scan matching (Karto/slam_toolbox/Cartographer-style).**
 
-Plan: implement (a) behind a `Slam.update(odometry, scan) -> (pose, grid)`
-interface so that (b) can replace it later. A "known-pose" diagnostic mode,
-where mapping uses ground truth, will exist **only** in tests and debug
-visualization, to separate mapper bugs from localizer bugs. It will never be
-an operating mode of the robot. M2 measured the dead-reckoning drift that M3
-has to beat: up to 8.6 m and 153° after 10 minutes of wandering.
+The director answered: "you choose. something that works in actual robotics,
+not just simulations", and asked for a multi-room apartment. Option (c) was
+chosen: it is what real LiDAR robots run, and it is the only one of the three
+that corrects mapped errors without a particle filter's costs. The nonlinear
+least-squares back end turned out to be small: a sparse Levenberg-Marquardt
+in about 150 lines of NumPy/SciPy, no new dependency.
+
+The design sits behind the `Slam` protocol (`localization/slam.py`), so another
+SLAM can replace `GraphSlam`. A ground-truth "known-pose" mode exists only in
+tests (`tests/test_slam_metrics.py`) and debugging scripts, never as robot
+behaviour. Measured result: about 1 cm RMS in the furnished studio and 2–5 cm
+in the apartment, against metres of dead-reckoning drift (ROADMAP, M3).

@@ -10,6 +10,7 @@ actually achieved.
 from __future__ import annotations
 
 import logging
+import math
 import os
 from collections import deque
 from datetime import datetime
@@ -19,11 +20,12 @@ import pygame
 
 from roombacalypse.autonomy.brain import Mode, RobotBrain
 from roombacalypse.core.config import ViewerConfig
-from roombacalypse.core.geometry import Point
+from roombacalypse.core.geometry import Point, transform_points
 from roombacalypse.environment.catalog import PLACEABLE
 from roombacalypse.environment.shapes import Shape
 from roombacalypse.environment.world import Obstacle
 from roombacalypse.evaluation.coverage import FootprintCoverage
+from roombacalypse.mapping.occupancy_grid import OccupancyGrid
 from roombacalypse.simulation.engine import Simulation
 from roombacalypse.visualization import hud
 from roombacalypse.visualization.camera import Camera
@@ -34,6 +36,7 @@ logger = logging.getLogger(__name__)
 SPEED_STEPS = (0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0)
 TRAIL_SAMPLE_PERIOD = 0.1  # [s] of simulation time between trail points
 TOAST_SECONDS = 3.5
+MAP_REFRESH_SECONDS = 4.0  # [s] wall time between full map re-renders after loop closures (one takes ~1 s)
 
 HELP_LINES: tuple[tuple[str, str], ...] = (
     ("Tab", "manual <-> autonomous"),
@@ -45,7 +48,9 @@ HELP_LINES: tuple[tuple[str, str], ...] = (
     ("R / Shift+R", "reset (same seed / next seed)"),
     ("L", "LiDAR rays"),
     ("G", "navigation: goal and DWA arcs"),
-    ("E", "belief: where odometry thinks it is"),
+    ("E", "belief: odometry (purple) and SLAM (green)"),
+    ("M", "the robot's map (occupancy grid)"),
+    ("P", "pose graph: keyframes and loop closures"),
     ("T", "trail"),
     ("Left click", "place obstacle"),
     ("O", "cycle obstacle type"),
@@ -93,6 +98,8 @@ class Viewer:
         self.show_lidar = True
         self.show_nav = True
         self.show_belief = False
+        self.show_map = True
+        self.show_graph = False
         self.template_index = 0
         self.trail: deque[Point] = deque(maxlen=max(2, int(config.trail_seconds / TRAIL_SAMPLE_PERIOD)))
         self.coverage = self._new_coverage()
@@ -105,6 +112,7 @@ class Viewer:
         self._toasts: list[tuple[str, float]] = []
         self._panning = False
         self._step_once = False
+        self._map_refreshed = -math.inf
         self.toast("Welcome. Tab hands control to the robot; H for help.")
 
     # ------------------------------------------------------------------ public API
@@ -252,9 +260,17 @@ class Viewer:
         elif key == pygame.K_e:
             self.show_belief = not self.show_belief
             if self.show_belief:
-                self.toast("Purple: where dead reckoning thinks the robot is.")
+                self.toast("Purple: dead reckoning. Green: SLAM.")
         elif key == pygame.K_t:
             self.show_trail = not self.show_trail
+        elif key == pygame.K_m:
+            self.show_map = not self.show_map
+            if self.show_map:
+                self.toast("Blue: the robot's own map, drawn where it really is.")
+        elif key == pygame.K_p:
+            self.show_graph = not self.show_graph
+            if self.show_graph:
+                self.toast("Green: keyframes. Yellow: loop closures.")
         elif key == pygame.K_o:
             self.template_index = (self.template_index + 1) % len(PLACEABLE)
             self.toast(f"Placing: {PLACEABLE[self.template_index].description}")
@@ -296,13 +312,29 @@ class Viewer:
             layers.plan = self.brain.wander.plan
             goal = self.brain.wander.goal
             if goal is not None:
-                # The goal lives in the odometry frame. Draw it *relative to the robot*, like the DWA
-                # arcs, so it shows where the robot is actually heading; drift is shown by the E layer.
-                relative = self.brain.odometry.pose.inverse_transform_point(*goal)
+                # The goal lives in the map frame. Draw it *relative to the robot*, like the DWA
+                # arcs, so it shows where the robot is actually heading; belief errors show on the E layer.
+                relative = self.brain.pose.inverse_transform_point(*goal)
                 layers.goal = self.sim.robot.pose.transform_point(*relative)
+        slam = self.brain.slam
         if self.show_belief:
             layers.belief = self.sim.boot_pose.compose(self.brain.odometry.pose)
+            layers.slam_belief = self.sim.boot_pose.compose(self.brain.pose)
+        if self.show_map:
+            layers.grid, layers.map_pose = self._map_grid(), self.sim.boot_pose
+        if self.show_graph and slam.keyframes:
+            nodes = slam.node_poses()
+            layers.graph_nodes = transform_points(self.sim.boot_pose, nodes[:, :2])
+            layers.graph_loops = [(e.i, e.j) for e in slam.graph.edges() if e.kind == "loop"]
         return layers
+
+    def _map_grid(self) -> OccupancyGrid:
+        """The robot's grid; after a loop closure it is re-rendered at most every few seconds (it takes a while)."""
+        slam = self.brain.slam
+        if slam.grid_is_stale and self._clock_seconds - self._map_refreshed >= MAP_REFRESH_SECONDS:
+            self._map_refreshed = self._clock_seconds
+            return slam.grid
+        return slam.grid_snapshot
 
     def _draw(self) -> None:
         mouse = pygame.mouse.get_pos()
@@ -326,7 +358,8 @@ class Viewer:
             trail=[*self.trail, self.sim.robot.pose.position] if self.show_trail else (),
             hover=hover, ghost=ghost, overlays=self._overlays(),
         )
-        toggles = (("lidar", self.show_lidar), ("nav", self.show_nav), ("belief", self.show_belief))
+        toggles = (("lidar", self.show_lidar), ("nav", self.show_nav), ("belief", self.show_belief),
+                   ("map", self.show_map), ("graph", self.show_graph))
         layers = " · ".join(name for name, on in toggles if on)
         ui = hud.UiState(
             speed=self.speed,

@@ -25,23 +25,26 @@ decisions; the agent implements. The original brief asked for:
 
 ## Status (check `git log` and `docs/ROADMAP.md`; this section may be stale)
 
-| Milestone | State as of 2026-11-03 |
+| Milestone | State as of 2026-11-05 |
 |---|---|
 | M1 "It moves": world, kinematics, collisions, manual control, viewer | committed (`436af18 milestone 1`) |
-| M2 "It sees": LiDAR/bumper/encoders, drive errors, DWA, exploration, headless runner | complete, verified; **was uncommitted**; check `git status` |
-| M3 "It knows where it is": occupancy grid + particle filter | next. **Blocked on decision D7** (below) |
+| M2 "It sees": LiDAR/bumper/encoders, drive errors, DWA, exploration, headless runner | committed (`825a480 milestone 2`) |
+| M3 "It knows where it is": graph SLAM, occupancy grid, apartment room, SLAM metrics | complete, verified; on branch `claude/compassionate-euler-e1nan3` |
 | M4–M7: planning/coverage/recovery, cleaning/battery/docking, personality, release | planned; designs in `docs/ARCHITECTURE.md` |
 
-**Open decisions for the director** (ask; don't decide alone):
+**Decisions taken in M3:**
 
-- **D7, the SLAM strategy, needed before M3.** The recommendation on the table:
-  Monte Carlo localization against the robot's own incrementally built
-  occupancy grid ("scan-to-map", no loop closure), behind a
-  `Slam.update(odometry, scan) -> (pose, grid)` interface so a
-  Rao-Blackwellized particle filter (GMapping-style) can replace it.
-  Full write-up: `docs/ARCHITECTURE.md` §16.
-- **Rooms:** any extra scenarios wanted? For example, multi-room with doors, a
-  furniture gauntlet, stairs and cliff sensors.
+- **D7.** The director delegated it ("you choose. something that works in actual
+  robotics, not just simulations"). Graph SLAM was chosen: Karto /
+  slam_toolbox / Cartographer style. See ARCHITECTURE §16 and
+  `docs/algorithms/slam.md`.
+- **Rooms.** The director asked for a multi-room apartment:
+  `config/rooms/apartment.toml`.
+
+**Open questions for the director** (ROADMAP, end):
+
+- add a gyroscope in M4?
+- global relocalization in M4's recovery ladder?
 
 The licence is MIT and confirmed; the copyright holder is in `LICENSE`.
 
@@ -57,13 +60,17 @@ The licence is MIT and confirmed; the copyright holder is in `LICENSE`.
 - Dependencies: numpy, scipy, pygame-ce; pytest for development; matplotlib
   optional. Do not add dependencies without a strong reason (an explicit rule
   of the brief).
-- Git: branch `main`, **no remote**.
+- Git: branch `main`; GitHub remote `hucils/Roombacalypse`. Cloud sessions
+  work on a `claude/...` branch. In M3's session, pushing failed with a 403:
+  the Claude GitHub App had no write access, so the commits stayed local.
+- Cloud sessions run on Linux (Python 3.13 venv via `uv venv --python 3.13`);
+  the director's own machine is macOS. There, timings were about 2× faster.
 
 ## Commands (run all before reporting a milestone)
 
 ```bash
-.venv/bin/python -m pytest -q                       # fast suite (~315 tests, ~8 s)
-.venv/bin/python -m pytest -q -m slow               # acceptance scenarios (~70 s), skipped by default
+.venv/bin/python -m pytest -q                       # fast suite (~375 tests, ~30 s)
+.venv/bin/python -m pytest -q -m slow               # acceptance scenarios (~8 min), skipped by default
 uvx ruff check roombacalypse tests main.py          # lint (line length 120)
 uvx mypy roombacalypse --python-executable .venv/bin/python
 # Python 3.12 compatibility (throwaway venv):
@@ -71,7 +78,8 @@ uv venv /tmp/rv312 --python 3.12 && uv pip install --python /tmp/rv312/bin/pytho
   && /tmp/rv312/bin/python -m pytest -q -p no:cacheprovider; rm -rf roombacalypse.egg-info
 
 .venv/bin/python main.py                                  # GUI (manual; Tab = autonomous)
-.venv/bin/python main.py --headless --duration 600 --seed 3   # ground-truth scorecard
+.venv/bin/python main.py --headless --duration 600 --seed 3   # ground-truth scorecard (incl. SLAM error, map P/R)
+.venv/bin/python main.py --headless --room apartment --seed 2  # the SLAM stress test
 .venv/bin/python main.py --screenshot out/x.png --frames 60 --mode auto   # offscreen render
 ```
 
@@ -111,7 +119,10 @@ post key events.
   - SI everywhere; config keys ending `_deg` are degrees.
   - World frame: x right, y up, θ counter-clockwise, wrapped to [−π, π).
   - Body frame: x forward, y left.
-  - Odometry/map frame: origin at the robot's boot pose on the dock.
+  - Odometry and map frames: origin at the robot's boot pose on the dock.
+    SLAM's pose is `correction ∘ odometry` (ROS `map → odom`). Goals and the
+    visit counter live in the map frame (`brain.pose`). The obstacle memory and
+    bump reflexes stay in odometry, because the map frame jumps at loop closures.
   - Only `visualization/camera.py` converts to screen pixels.
 - **Configuration:**
   - Every tunable is a field of a frozen dataclass in `core/config.py`, with
@@ -205,7 +216,33 @@ floor (rasterize, distance transform, flood fill from the dock, dilate). It is
 computed once per reset. Reuse it for M5 cleaning metrics.
 
 **Rendering:** the viewer draws the robot's goal and DWA arcs relative to the
-**true** pose. Belief (the odometry ghost, E) is drawn via `sim.boot_pose`.
+**true** pose. Belief (the odometry and SLAM ghosts, E; the map, M; the pose
+graph, P) is drawn via `sim.boot_pose`, so belief errors show as they are. A
+map re-render after a loop closure costs about 1 ms per keyframe; the viewer
+throttles it (`MAP_REFRESH_SECONDS`).
+
+**SLAM** (`localization/slam.py`, `localization/scan_matcher.py`, `mapping/`; history in
+`docs/algorithms/slam.md`). Each item below fixed a measured problem. Keep:
+
+- reference maps of **surface elements** (PCA over 5×5 cells, refit over 9×9
+  where blurred), classified line, point or blob. Point-to-line residuals give
+  sub-cell accuracy. Blobs constrain nothing, because treating them as points
+  pinned corridors along their length;
+- scan surfaces sampled at **segment midpoints**. Sampling from each return
+  toward the next made a chiral heading bias of −0.005° per keyframe;
+- **frozen-correspondence ICP** (re-associate, then Gauss-Newton). Letting the
+  cost jump inside a line search stalled the solver on the odometry side;
+- **vector residuals for point elements**, not `|x − p|`, which oscillates;
+- information from **ICP normals** (zero along a corridor), not from `JᵀJ` of
+  the likelihood cost, which faked information along walls;
+- the **per-scan slip check**: spinning wheels otherwise let the pose run
+  22 cm ahead;
+- **map precision counts phantom obstacles** in free space. Thickening into
+  solid matter is normal and allowed;
+- debugging method that worked: record one run (odometry, scans, truth) and
+  replay SLAM variants offline on identical data. Compare against an
+  *oracle* local map built at true poses to separate matcher bias from
+  chaining drift.
 
 ## Workflow with the director
 
@@ -240,27 +277,28 @@ roombacalypse/environment/        shapes (SAT, circle queries), World, rooms (TO
 roombacalypse/robot/              drivetrain limits, wheels.py (hidden errors), body state + Contact
 roombacalypse/sensors/            raycast.py, lidar.py, bumper.py, encoders.py
 roombacalypse/simulation/         clock, physics.py (contact solver, pushing), engine.py (step loop)
-roombacalypse/localization/       odometry.py (dead reckoning)           [M3: particle filter]
+roombacalypse/mapping/            occupancy_grid.py, likelihood_field.py (surface fields), pose_graph.py (LM, Cauchy)
+roombacalypse/localization/       odometry.py, scan_matcher.py (correlative B&B + PL-ICP), slam.py (GraphSlam, Slam protocol)
 roombacalypse/navigation/         local_obstacles.py (memory, swept-disc free distance), dwa.py
 roombacalypse/autonomy/           brain.py (RobotBrain, modes), teleop.py, wander.py
-roombacalypse/evaluation/         metrics.py, coverage.py, scenario.py (headless scorecard)
+roombacalypse/evaluation/         metrics.py, coverage.py, slam_metrics.py (ATE, map P/R), scenario.py (scorecard)
 roombacalypse/visualization/      camera (pure math), renderer, hud, viewer, palette
-config/default.toml, config/rooms/*.toml    parameters and room layouts (studio, test_chamber)
+config/default.toml, config/rooms/*.toml    parameters and room layouts (studio, test_chamber, apartment)
 tests/                            fast suite + test_acceptance.py (slow) + test_architecture.py
 docs/                             ARCHITECTURE.md, ROADMAP.md, algorithms/*.md, images/
 ```
 
-## Planned next steps (M3 outline; confirm D7 first)
+## Planned next steps (M4 outline)
 
-- `mapping/`: a log-odds occupancy grid (5 cm cells), an inverse sensor model,
-  vectorized beam tracing de-duplicated per scan, clamped log-odds.
-- `localization/`: MCL with the odometry motion model, a likelihood field from
-  `scipy.ndimage.distance_transform_edt`, low-variance resampling triggered by
-  effective sample size, and a circular mean for θ.
-- SLAM coupling behind a `Slam` interface. A ground-truth "known-pose" mapping
-  mode may exist **only** for tests and debugging, never as robot behaviour.
-- `evaluation/`: absolute trajectory error and map precision/recall against
-  ground truth. Targets: ATE < 5 cm and precision ≥ 0.95 after 10 minutes;
-  set final thresholds from measurements.
-- Viewer layers: `M` map and `P` particles. Switch wander's visit memory to the
-  localized pose.
+- Ask the director the two open questions first (gyroscope; global relocalization).
+- `planning/`: costmap from `brain.slam.grid`, with inflation by robot radius
+  plus margin; A\* with octile heuristic; BA\* coverage on a coarse grid;
+  frontier exploration once coverage runs out.
+- Path following: lookahead points on the A\* path become DWA goals (DWA is unchanged).
+- Executive state machine replaces `wander` (ARCHITECTURE §10.1). Stuck
+  detectors and a recovery ladder. "Wheel slip" can reuse SLAM's per-scan fit;
+  "rotate and re-localize" needs global relocalization.
+- Acceptance: ≥ 90 % of the studio's accessible floor in 30 minutes; the
+  apartment gets its own (lower) threshold, measured.
+- Watch the map re-render cost (~1 ms per keyframe) in 30-minute runs; submaps
+  if needed.
