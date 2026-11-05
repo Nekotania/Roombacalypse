@@ -7,8 +7,9 @@ docs/algorithms/slam.md for the derivations and measured performance.
 
 **Front end (tracking).** Odometry predicts the pose. Whenever the robot has
 travelled ``node_distance`` or turned ``node_angle_deg`` since the last
-keyframe, the new scan is matched against a *local map*, the likelihood
-field of the last ``local_map_nodes`` keyframes' scans:
+keyframe, or a scan fits the map clearly worse at the predicted pose than the
+last keyframe did (the wheels are slipping), the new scan is matched against
+a *local map*, the surfaces of the last ``local_map_nodes`` keyframes' scans:
 
 1. Gauss-Newton refinement from the odometry prediction (fast; enough almost always);
 2. if the scan fits poorly, a correlative search over a wider window (after
@@ -68,6 +69,7 @@ _LOOP_FLOOR = (0.02, 0.02, math.radians(0.5))  # std floors of a loop-closure co
 _ODOMETRY_FLOOR = (0.002, math.radians(0.1))  # std floors of an odometry step [m, rad]
 _UNOBSERVED = 1.0  # information added to every direction before inverting (caps std at 1 m / 1 rad)
 _LOCAL_MAP_REFRESH = 3  # rebuild the local map every this many keyframes (it changes slowly)
+_SLIP_FIT = 0.85  # a scan fitting worse than this fraction of the last keyframe's fit forces a new match
 _SEARCH_VOXEL = 0.08  # [m] the correlative stage of loop closure uses a further thinned scan
 _LOCAL_MAP_RADIUS = 8.0  # [m] the local map keeps mapped points this close to the newest keyframe
 
@@ -191,9 +193,24 @@ class GraphSlam:
 
     def update(self, time: float, odometry: Pose2D, scan: LidarScan | None) -> Pose2D:
         self.odometry = odometry
-        if scan is not None and self._keyframe_due(odometry):
-            self._add_keyframe(time, odometry, scan)
+        if scan is not None:
+            points = voxel_filter(scan.points(), self.config.scan_voxel)
+            if self._keyframe_due(odometry) or self._slipping(points):
+                self._add_keyframe(time, odometry, scan, points)
         return self.pose
+
+    def _slipping(self, points: np.ndarray) -> bool:
+        """Does this scan fit the map noticeably worse at the predicted pose than the last keyframe did?
+
+        Between keyframes the pose follows odometry, which is excellent unless the
+        wheels slip (pushing against a wall, a rug): then the encoders report motion
+        that did not happen. Checking every scan against the local map at the
+        predicted pose (well under a millisecond) catches that and forces a match.
+        """
+        if self._local_field is None or not self.keyframes:
+            return False
+        fit = self.matcher.score(self._local_field, points, self.pose)
+        return fit < _SLIP_FIT * self.keyframes[-1].score
 
     # ------------------------------------------------------------------ statistics
 
@@ -220,9 +237,8 @@ class GraphSlam:
         return (math.hypot(moved.x, moved.y) >= self.config.node_distance
                 or abs(moved.theta) >= math.radians(self.config.node_angle_deg))
 
-    def _add_keyframe(self, time: float, odometry: Pose2D, scan: LidarScan) -> None:
+    def _add_keyframe(self, time: float, odometry: Pose2D, scan: LidarScan, points: np.ndarray) -> None:
         cfg = self.config
-        points = voxel_filter(scan.points(), cfg.scan_voxel)
         surface = surface_points(scan, 0.5 * cfg.field_resolution)
         predicted = self.correction.compose(odometry)
         if not self.keyframes:
