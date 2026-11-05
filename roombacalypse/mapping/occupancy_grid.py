@@ -13,10 +13,12 @@ forgotten (or a new box learnt) within a few scans.
 
 Implementation notes:
 
-* **Vectorised ray tracing.** Every beam is sampled at half-cell steps (a
+* **Vectorised ray tracing.** Every beam is sampled once per cell length (a
   ragged set of samples built with ``np.repeat``), and all samples of a scan
   are converted to cells at once. Sampling instead of Bresenham can skip a
-  cell where a beam clips its corner; neighbouring beams cover it.
+  cell where a beam clips its corner; neighbouring beams and later scans
+  cover it. (Half-cell sampling took twice as long for the same measured map
+  precision and recall.)
 * **One update per cell per scan.** A cell crossed by twenty beams near the
   robot gets one miss, not twenty, and a cell that is both crossed and hit
   counts as hit. A scan is one measurement of each cell it sees.
@@ -43,7 +45,7 @@ from roombacalypse.core.geometry import Point, Pose2D, transform_points
 from roombacalypse.core.messages import LidarScan
 
 GROWTH_MARGIN = 2.0  # [m] of extra room added whenever the grid has to grow
-_SAMPLE_STEP = 0.5  # free-space samples per beam, in cells
+_SAMPLE_STEP = 1.0  # free-space sample spacing along a beam, in cells (half a cell: twice the work, same map)
 
 
 class OccupancyGrid:
@@ -140,7 +142,7 @@ class OccupancyGrid:
         dx = endpoints[:, 0] - ox
         dy = endpoints[:, 1] - oy
         length = np.hypot(dx, dy)
-        # Free space: samples every half cell from the sensor to half a cell short of the return.
+        # Free space: samples every cell length from the sensor to half a cell short of the return.
         step = _SAMPLE_STEP * res
         counts = np.maximum(np.ceil((length - 0.5 * res) / step), 0).astype(np.intp)
         beam = np.repeat(np.arange(endpoints.shape[0]), counts)

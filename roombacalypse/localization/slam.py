@@ -187,6 +187,11 @@ class GraphSlam:
         return self._grid
 
     @property
+    def grid_snapshot(self) -> OccupancyGrid:
+        """The grid as it is now, without re-rendering: it may lag behind the latest loop closure."""
+        return self._grid
+
+    @property
     def grid_is_stale(self) -> bool:
         """True if reading :attr:`grid` would re-render it from every keyframe (a loop closure moved them)."""
         return self._grid_dirty

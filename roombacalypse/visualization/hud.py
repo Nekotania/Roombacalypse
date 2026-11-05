@@ -112,7 +112,7 @@ def draw_panel(
     pygame.draw.line(surface, palette.PANEL_RULE, rect.topleft, rect.bottomleft, 2)
     col = TextColumn(surface, rect, fonts)
     col.title("ROOMBACALYPSE")
-    col.line(f"v{__version__} · milestone 2: it sees", palette.TEXT_DIM, fonts.small)
+    col.line(f"v{__version__} · milestone 3: it knows where it is", palette.TEXT_DIM, fonts.small)
 
     col.section("simulation")
     col.row("time", format_time(sim.time))
@@ -128,8 +128,8 @@ def draw_panel(
         col.row("mode", f"AUTONOMOUS · {brain.wander.state.value}", palette.ACCENT)
         goal = brain.wander.goal
         if goal is not None:
-            odom = brain.odometry.pose
-            col.row("goal", f"{math.hypot(goal[0] - odom.x, goal[1] - odom.y):.2f} m away (belief)")
+            belief_pose = brain.pose
+            col.row("goal", f"{math.hypot(goal[0] - belief_pose.x, goal[1] - belief_pose.y):.2f} m away (belief)")
         else:
             col.row("goal", "none")
     else:
@@ -160,11 +160,21 @@ def draw_panel(
             palette.BAD if bumper.pressed else palette.TEXT)
     col.row("odometry", f"{brain.odometry.distance:.2f} m travelled")
 
-    col.section("belief · dead reckoning")
+    col.section("belief · SLAM vs dead reckoning")
+    slam = brain.slam
+    located = sim.boot_pose.compose(brain.pose)
+    error = located.distance_to(pose)
+    heading_error = abs(math.degrees(math.remainder(located.theta - pose.theta, 2 * math.pi)))
+    col.row("SLAM", f"{100 * error:.1f} cm · {heading_error:.1f}° from truth", palette.WARN if error > 0.05 else palette.GOOD)
     belief = sim.boot_pose.compose(brain.odometry.pose)
     drift = belief.distance_to(pose)
     heading_error = abs(math.degrees(math.remainder(belief.theta - pose.theta, 2 * math.pi)))
-    col.row("drift", f"{drift:.2f} m · {heading_error:.1f}° from truth", palette.WARN if drift > 0.5 else palette.TEXT)
+    col.row("odometry", f"{drift:.2f} m · {heading_error:.1f}° from truth", palette.WARN if drift > 0.5 else palette.TEXT)
+    if slam.lost:
+        col.row("tracking", f"LOST · scan fit {slam.tracking_score:.2f}", palette.BAD)
+    else:
+        col.row("tracking", f"scan fit {slam.tracking_score:.2f}")
+    col.row("map", f"{len(slam.keyframes)} keyframes · {len(slam.loop_closures)} loops")
 
     col.section("statistics")
     col.row("distance", f"{body.odometer:.1f} m · swept {100 * ui.coverage:.0f}% of floor")
@@ -176,7 +186,7 @@ def draw_panel(
         col.line(text[:44], _SOURCE_COLORS.get(event.source, palette.TEXT), fonts.small)
 
     col.y = rect.bottom - 2 * fonts.small.get_linesize() - 10
-    col.line("H help · Tab mode · L G E layers · Esc quit", palette.TEXT_DIM, fonts.small)
+    col.line("H help · Tab mode · L G E M P layers", palette.TEXT_DIM, fonts.small)
     col.line(f"{ui.fps:3.0f} fps · layers: {ui.layers}", palette.TEXT_DIM, fonts.small)
 
 

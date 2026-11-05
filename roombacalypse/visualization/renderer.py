@@ -13,14 +13,16 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
+import numpy as np
 import pygame
 from pygame import gfxdraw
 
 from roombacalypse.core.config import RobotSpec
 from roombacalypse.core.geometry import Point, Pose2D, cross, transform_points
 from roombacalypse.core.messages import LidarScan
+from roombacalypse.mapping.occupancy_grid import OccupancyGrid
 from roombacalypse.environment.shapes import Circle, Shape
 from roombacalypse.environment.world import Obstacle, ObstacleKind, World
 from roombacalypse.navigation.dwa import DwaPlan
@@ -47,6 +49,16 @@ class Overlays:
     """Exploration goal in world coordinates (as the robot believes it)."""
     belief: Pose2D | None = None
     """Where the robot's odometry thinks it is, in world coordinates."""
+    slam_belief: Pose2D | None = None
+    """Where SLAM thinks the robot is, in world coordinates."""
+    grid: OccupancyGrid | None = None
+    """The robot's occupancy grid (map frame), drawn through ``map_pose``."""
+    map_pose: Pose2D | None = None
+    """Where the robot's map frame really is in the world (its boot pose): shows map errors as they are."""
+    graph_nodes: np.ndarray | None = None
+    """Keyframe positions ``(n, 2)`` in world coordinates."""
+    graph_loops: list[tuple[int, int]] = field(default_factory=list)
+    """Loop-closure constraints as pairs of keyframe indices."""
 
 
 class WorldRenderer:
@@ -57,6 +69,8 @@ class WorldRenderer:
         self._floor: pygame.Surface | None = None
         self._floor_key: object = None
         self._overlay: pygame.Surface | None = None
+        self._map: tuple[pygame.Surface, tuple[float, float]] | None = None
+        self._map_key: object = None
 
     def draw(
         self,
@@ -209,6 +223,10 @@ class WorldRenderer:
     # ------------------------------------------------------------------ overlays
 
     def _draw_overlays(self, overlay: pygame.Surface, camera: Camera, pose: Pose2D, layers: Overlays) -> None:
+        if layers.grid is not None and layers.map_pose is not None:
+            self._draw_map(overlay, camera, layers.grid, layers.map_pose)
+        if layers.graph_nodes is not None:
+            self._draw_graph(overlay, camera, layers.graph_nodes, layers.graph_loops)
         if layers.plan is not None:
             self._draw_plan(overlay, camera, pose, layers.plan)
         if layers.goal is not None:
@@ -216,7 +234,55 @@ class WorldRenderer:
         if layers.scan is not None and layers.scan_pose is not None:
             self._draw_scan(overlay, camera, layers.scan, layers.scan_pose)
         if layers.belief is not None:
-            self._draw_belief(overlay, camera, pose, layers.belief)
+            self._draw_belief(overlay, camera, pose, layers.belief, palette.BELIEF)
+        if layers.slam_belief is not None:
+            self._draw_belief(overlay, camera, pose, layers.slam_belief, palette.SLAM_BELIEF)
+
+    def _draw_map(self, overlay: pygame.Surface, camera: Camera, grid: OccupancyGrid, map_pose: Pose2D) -> None:
+        """The occupancy grid, cropped to the view, scaled and rotated into the world through ``map_pose``."""
+        key = (id(grid), grid.version, camera.key, map_pose, overlay.get_size())
+        if self._map_key != key:
+            self._map = self._render_map(camera, grid, map_pose)
+            self._map_key = key
+        if self._map is not None:
+            image, (x, y) = self._map
+            overlay.blit(image, (x, y))
+
+    @staticmethod
+    def _render_map(camera: Camera, grid: OccupancyGrid, map_pose: Pose2D
+                    ) -> tuple[pygame.Surface, tuple[float, float]] | None:
+        rows, cols = grid.shape
+        if rows == 0 or cols == 0:
+            return None
+        left, top, width, height = camera.viewport
+        corners = [map_pose.inverse_transform_point(*camera.to_world(sx, sy))
+                   for sx, sy in ((left, top), (left + width, top), (left, top + height), (left + width, top + height))]
+        res, (ox, oy) = grid.resolution, grid.origin
+        c0 = max(0, math.floor((min(c[0] for c in corners) - ox) / res) - 1)
+        c1 = min(cols, math.ceil((max(c[0] for c in corners) - ox) / res) + 1)
+        r0 = max(0, math.floor((min(c[1] for c in corners) - oy) / res) - 1)
+        r1 = min(rows, math.ceil((max(c[1] for c in corners) - oy) / res) + 1)
+        if c0 >= c1 or r0 >= r1:
+            return None
+        cells = grid.log_odds[r0:r1, c0:c1]
+        rgba = np.zeros((*cells.shape, 4), dtype=np.uint8)
+        rgba[cells < grid.config.free_log_odds] = palette.MAP_FREE
+        rgba[cells > grid.config.occupied_log_odds] = palette.MAP_OCCUPIED
+        image = pygame.image.frombuffer(np.ascontiguousarray(rgba[::-1]).tobytes(), (c1 - c0, r1 - r0), "RGBA")
+        size = (max(1, round((c1 - c0) * res * camera.scale)), max(1, round((r1 - r0) * res * camera.scale)))
+        image = pygame.transform.rotate(pygame.transform.scale(image, size), math.degrees(map_pose.theta))
+        centre = camera.to_screen(*map_pose.transform_point(ox + 0.5 * (c0 + c1) * res, oy + 0.5 * (r0 + r1) * res))
+        return image, (centre[0] - 0.5 * image.get_width(), centre[1] - 0.5 * image.get_height())
+
+    @staticmethod
+    def _draw_graph(overlay: pygame.Surface, camera: Camera, nodes: np.ndarray, loops: list[tuple[int, int]]) -> None:
+        points = [camera.to_screen(float(x), float(y)) for x, y in nodes]
+        if len(points) >= 2:
+            pygame.draw.lines(overlay, palette.GRAPH_EDGE, False, points, 1)
+        for i, j in loops:
+            pygame.draw.line(overlay, palette.GRAPH_LOOP, points[i], points[j], 2)
+        for p in points:
+            pygame.draw.circle(overlay, palette.GRAPH_NODE, p, 2)
 
     @staticmethod
     def _draw_scan(overlay: pygame.Surface, camera: Camera, scan: LidarScan, pose: Pose2D) -> None:
@@ -250,10 +316,11 @@ class WorldRenderer:
         pygame.draw.line(overlay, color, (cx - 1.6 * r, cy), (cx + 1.6 * r, cy), 2)
         pygame.draw.line(overlay, color, (cx, cy - 1.6 * r), (cx, cy + 1.6 * r), 2)
 
-    def _draw_belief(self, overlay: pygame.Surface, camera: Camera, truth: Pose2D, belief: Pose2D) -> None:
-        color = (*palette.BELIEF, 220)
+    def _draw_belief(self, overlay: pygame.Surface, camera: Camera, truth: Pose2D, belief: Pose2D,
+                     tint: palette.Color) -> None:
+        color = (*tint, 220)
         centre = camera.to_screen(belief.x, belief.y)
-        pygame.draw.line(overlay, (*palette.BELIEF, 140), camera.to_screen(truth.x, truth.y), centre, 1)
+        pygame.draw.line(overlay, (*tint, 140), camera.to_screen(truth.x, truth.y), centre, 1)
         pygame.draw.circle(overlay, color, centre, max(4.0, camera.length(self.spec.radius)), 2)
         tip = camera.to_screen(*belief.transform_point(self.spec.radius, 0.0))
         pygame.draw.line(overlay, color, centre, tip, 2)
