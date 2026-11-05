@@ -6,17 +6,23 @@ A small state machine on top of the DWA local planner:
 * **CRUISE** towards an exploration goal. Goals are chosen from the current
   scan: for each candidate direction, how far could the body travel (a swept
   disc against the scan points), scored by distance, by how rarely the robot
-  has been near that spot (a coarse visit counter in the odometry frame) and
-  by a random factor from the robot's own seeded stream. DWA drives there.
+  has been near that spot (a coarse visit counter) and by a random factor
+  from the robot's own seeded stream. DWA drives there.
   A goal is dropped when reached, when it times out, when the distance to it
   stops shrinking, or when DWA reports that only turning on the spot is safe.
 * **BACK OFF** a few centimetres after a bump, if the LiDAR says the space
   behind is clear (there is no rear bumper).
 * **TURN** on the spot by a random angle away from the bumped side, then cruise.
 
-This is deliberately map-free and memory-light: exactly what the robot can
-do with Milestone 2's sensors. Milestone 4 replaces goal picking with
-coverage planning on a map. See docs/algorithms/dwa.md.
+Frames: goals and the visit counter live in the *map frame* and use the
+SLAM pose (Milestone 3), so the counter no longer smears as odometry drifts;
+the bump reflexes (back off a few centimetres, turn by an angle) use
+odometry, which is smooth and locally accurate, like the ``odom`` frame of a
+ROS robot. Without a SLAM pose, the odometry pose serves for both.
+
+The behaviour itself is still map-free: it picks goals from the current
+scan. Milestone 4 replaces goal picking with coverage planning on the map.
+See docs/algorithms/dwa.md.
 """
 
 from __future__ import annotations
@@ -49,7 +55,7 @@ class WanderState(StrEnum):
 
 
 class VisitGrid:
-    """Counts control ticks spent in each cell of a coarse grid (odometry frame)."""
+    """Counts control ticks spent in each cell of a coarse grid (map frame)."""
 
     def __init__(self, cell_size: float) -> None:
         self.cell_size = cell_size
@@ -93,7 +99,7 @@ class WanderBehaviour:
         self._rng = np.random.default_rng(0)
         self.state = WanderState.WAIT
         self.goal: Point | None = None
-        """Current exploration goal in the odometry frame."""
+        """Current exploration goal in the map frame."""
         self.plan: DwaPlan | None = None
         """Latest DWA result (for visualisation)."""
         self.goals_chosen = 0
@@ -138,28 +144,33 @@ class WanderBehaviour:
         obstacles: np.ndarray,
         new_bump: BumperReading | None,
         scan_ready: bool,
+        pose: Pose2D | None = None,
     ) -> DriveCommand:
-        """One control tick. ``obstacles`` are points in the current body frame."""
-        pose = odometry.pose
+        """One control tick.
+
+        ``obstacles`` are points in the current body frame; ``pose`` is the
+        robot's map-frame estimate (default: the odometry pose).
+        """
+        if pose is None:
+            pose = odometry.pose
         self.visits.mark(pose.x, pose.y)
         if new_bump is not None and self.state in (WanderState.CRUISE, WanderState.WAIT):
-            self._start_escape(time, pose, obstacles, new_bump)
+            self._start_escape(time, odometry.pose, obstacles, new_bump)
         if self.state is WanderState.WAIT:
             if not scan_ready:
                 return STOP
             self.state = WanderState.CRUISE
         if self.state is WanderState.BACK_OFF:
-            command = self._back_off(time, pose, obstacles)
+            command = self._back_off(time, odometry.pose, obstacles)
             if command is not None:
                 return command
         if self.state is WanderState.TURN:
-            command = self._turn(time, pose)
+            command = self._turn(time, odometry.pose)
             if command is not None:
                 return command
-        return self._cruise(time, odometry, obstacles)
+        return self._cruise(time, odometry, pose, obstacles)
 
-    def _cruise(self, time: float, odometry: OdometryTracker, obstacles: np.ndarray) -> DriveCommand:
-        pose = odometry.pose
+    def _cruise(self, time: float, odometry: OdometryTracker, pose: Pose2D, obstacles: np.ndarray) -> DriveCommand:
         if self.goal is not None:
             reason = self._goal_problem(time, pose)
             if reason is not None:
@@ -168,7 +179,8 @@ class WanderBehaviour:
                 self._emit(time, f"goal {reason}", reason=reason)
                 self.goal = None
         if self.goal is None and not self._choose_goal(time, pose, obstacles):
-            self._begin_turn(time, pose, float(self._rng.choice((-1.0, 1.0))), math.radians(self._rng.uniform(60, 120)))
+            self._begin_turn(time, odometry.pose, float(self._rng.choice((-1.0, 1.0))),
+                             math.radians(self._rng.uniform(60, 120)))
             self._emit(time, "boxed in: turning to look for space")
             return DriveCommand(0.0, self._turn_direction * self.config.turn_speed)
         assert self.goal is not None

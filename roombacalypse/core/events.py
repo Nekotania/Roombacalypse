@@ -21,6 +21,7 @@ class EventKind(StrEnum):
     BUMP = "bump"  # robot: a bumper switch closed
     MODE = "mode"  # robot: manual <-> autonomous
     BEHAVIOUR = "behaviour"  # robot: new goal, escape manoeuvre, stall, ...
+    MAP = "map"  # robot: loop closed (map corrected), scan did not fit the map
     WORLD_EDIT = "world_edit"  # user: obstacle placed or removed
 
 

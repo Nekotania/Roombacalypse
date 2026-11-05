@@ -15,6 +15,7 @@ from roombacalypse.core.events import EventKind, EventLog
 from roombacalypse.environment.rooms import RoomSpec
 from roombacalypse.evaluation.coverage import FootprintCoverage
 from roombacalypse.evaluation.metrics import min_separation, pose_error
+from roombacalypse.evaluation.slam_metrics import MapAccuracy, MapScore, TrajectoryError, TrajectoryRecorder
 from roombacalypse.simulation.engine import Simulation
 
 
@@ -45,6 +46,15 @@ class ScenarioResult:
     """Final dead-reckoning position error [m]."""
     odometry_heading_error: float
     """Final dead-reckoning heading error [rad]."""
+    online: TrajectoryError
+    """SLAM pose the robot used for control, at every control tick, against the truth."""
+    keyframes: TrajectoryError
+    """Final (optimised) keyframe poses against the truth."""
+    map: MapScore
+    """The robot's occupancy grid against the true scan-plane geometry."""
+    keyframe_count: int
+    loop_closures: int
+    loop_attempts: int
     goals: int
     escapes: int
     abandoned: int
@@ -72,6 +82,16 @@ class ScenarioResult:
                 f"penetration     {'none' if self.min_separation > -1e-9 else f'{-self.min_separation:.2e} m'}",
                 f"odometry drift  {self.odometry_position_error:.2f} m, "
                 f"{math.degrees(self.odometry_heading_error):.1f}° after {self.duration:.0f} s",
+                f"SLAM pose error {100 * self.online.rms_position:.1f} cm RMS, "
+                f"{100 * self.online.max_position:.1f} cm max; "
+                f"heading {math.degrees(self.online.rms_heading):.2f}° RMS, "
+                f"{math.degrees(self.online.max_heading):.1f}° max",
+                f"SLAM keyframes  {self.keyframe_count}, ATE {100 * self.keyframes.rms_position:.1f} cm RMS "
+                f"({100 * self.keyframes.aligned_rms_position:.1f} cm aligned); "
+                f"{self.loop_closures} loop closures in {self.loop_attempts} attempts",
+                f"map             precision {100 * self.map.precision:.1f} % (surface only "
+                f"{100 * self.map.surface_precision:.1f} %), recall {100 * self.map.recall:.1f} %, "
+                f"{self.map.occupied_cells} occupied cells",
                 f"behaviour       {self.goals} goals, {self.abandoned} abandoned, {self.escapes} bump escapes",
             ]
         )
@@ -91,15 +111,24 @@ def run_scenario(
     brain = RobotBrain(config, publish=events.publisher("robot"), mode=mode)
     sim = Simulation(config, room, brain, seed=seed, events=events)
     coverage = FootprintCoverage(sim.world, config.robot, sim.robot.pose.position)
+    recorder = TrajectoryRecorder(sim.boot_pose)
+    map_accuracy = MapAccuracy(sim.world, config.lidar.mount_height, sim.boot_pose)
+    control_every = round(sim.control_period / sim.dt)
     worst = math.inf
     started = wallclock.perf_counter()
     for _ in range(round(duration / sim.dt)):
+        tick, time, before, scan = sim.tick, sim.time, sim.robot.pose, sim.last_scan
         sim.step()
+        if tick % control_every == 0:  # the brain just updated from a frame taken at `time`
+            recorder.record(time, before, brain.pose)
+        if sim.last_scan is not scan and sim.last_scan is not None and sim.last_scan_pose is not None:
+            map_accuracy.observe(sim.last_scan, sim.last_scan_pose)
         pose = sim.robot.pose
         coverage.mark(pose.x, pose.y)
         if check_penetration:
             worst = min(worst, min_separation(sim.world, pose, config.robot))
     elapsed = wallclock.perf_counter() - started
+    slam = brain.slam
     scan_height = config.lidar.mount_height
     visible_collisions = 0
     for event in events.recent(events.total):
@@ -126,6 +155,12 @@ def run_scenario(
         min_separation=worst,
         odometry_position_error=position_error,
         odometry_heading_error=heading_error,
+        online=recorder.online_error(),
+        keyframes=recorder.keyframe_error([k.time for k in slam.keyframes], slam.node_poses()),
+        map=map_accuracy.score(slam.grid),
+        keyframe_count=len(slam.keyframes),
+        loop_closures=len(slam.loop_closures),
+        loop_attempts=slam.loop_attempts,
         goals=brain.wander.goals_chosen,
         escapes=brain.wander.escapes,
         abandoned=brain.wander.abandoned,
