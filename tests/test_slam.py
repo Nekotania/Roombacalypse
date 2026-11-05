@@ -78,7 +78,7 @@ LOOP_ROOM = box_room(6.0, 5.0, obstacles=[
 
 
 def test_with_perfect_sensors_slam_is_millimetre_accurate() -> None:
-    sim, probe, samples = _drive(IDEAL, LOOP_ROOM, LOOP)
+    _, probe, samples = _drive(IDEAL, LOOP_ROOM, LOOP)
     slam_errors = _errors(samples, 2)
     assert slam_errors[:, 0].max() < 0.01
     assert slam_errors[:, 1].max() < math.radians(0.3)
@@ -90,7 +90,7 @@ def test_with_perfect_sensors_slam_is_millimetre_accurate() -> None:
 
 def test_slam_beats_dead_reckoning_by_an_order_of_magnitude() -> None:
     config = dataclasses.replace(DEFAULT, drive_errors=dataclasses.replace(DEFAULT.drive_errors, wheel_base_std=0.03))
-    sim, probe, samples = _drive(config, load_room(resolve_room_path("studio")), STUDIO_TOUR, seed=4)
+    _, _, samples = _drive(config, load_room(resolve_room_path("studio")), STUDIO_TOUR, seed=4)
     slam_errors, odometry_errors = _errors(samples, 2), _errors(samples, 3)
     assert odometry_errors[-1, 0] > 0.1  # a 3 % wheel-base error: about 11 cm after this 35 s tour
     # The tour pushes into walls at full speed with the wheels spinning. Between two scans the belief follows

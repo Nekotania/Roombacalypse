@@ -22,9 +22,9 @@ from pygame import gfxdraw
 from roombacalypse.core.config import RobotSpec
 from roombacalypse.core.geometry import Point, Pose2D, cross, transform_points
 from roombacalypse.core.messages import LidarScan
-from roombacalypse.mapping.occupancy_grid import OccupancyGrid
 from roombacalypse.environment.shapes import Circle, Shape
 from roombacalypse.environment.world import Obstacle, ObstacleKind, World
+from roombacalypse.mapping.occupancy_grid import OccupancyGrid
 from roombacalypse.navigation.dwa import DwaPlan
 from roombacalypse.robot.body import RobotBody
 from roombacalypse.visualization import palette

@@ -165,11 +165,13 @@ def draw_panel(
     located = sim.boot_pose.compose(brain.pose)
     error = located.distance_to(pose)
     heading_error = abs(math.degrees(math.remainder(located.theta - pose.theta, 2 * math.pi)))
-    col.row("SLAM", f"{100 * error:.1f} cm · {heading_error:.1f}° from truth", palette.WARN if error > 0.05 else palette.GOOD)
+    col.row("SLAM", f"{100 * error:.1f} cm · {heading_error:.1f}° from truth",
+            palette.WARN if error > 0.05 else palette.GOOD)
     belief = sim.boot_pose.compose(brain.odometry.pose)
     drift = belief.distance_to(pose)
     heading_error = abs(math.degrees(math.remainder(belief.theta - pose.theta, 2 * math.pi)))
-    col.row("odometry", f"{drift:.2f} m · {heading_error:.1f}° from truth", palette.WARN if drift > 0.5 else palette.TEXT)
+    col.row("odometry", f"{drift:.2f} m · {heading_error:.1f}° from truth",
+            palette.WARN if drift > 0.5 else palette.TEXT)
     if slam.lost:
         col.row("tracking", f"LOST · scan fit {slam.tracking_score:.2f}", palette.BAD)
     else:

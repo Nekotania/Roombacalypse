@@ -7,7 +7,8 @@ Package map (see ``docs/ARCHITECTURE.md`` for the full picture):
 * ``robot``         ground truth: drivetrain, wheel/ground errors, body state
 * ``sensors``       ground truth -> readings: LiDAR, bumper, wheel encoders
 * ``simulation``    contact physics, clock, the simulation engine
-* ``localization``  belief: odometry (M2), particle filter (M3)
+* ``mapping``       belief: occupancy grid, surface fields, pose-graph optimiser (M3)
+* ``localization``  belief: odometry (M2), scan matching and graph SLAM (M3)
 * ``navigation``    belief: obstacle memory, Dynamic Window Approach planner
 * ``autonomy``      belief: the robot's brain, teleoperation, exploration behaviour
 * ``evaluation``    harness: ground-truth scoring and headless scenarios
