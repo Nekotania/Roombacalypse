@@ -90,7 +90,7 @@ def _room_grid() -> OccupancyGrid:
 
 def test_costmap_inflates_obstacles_by_the_inscribed_radius() -> None:
     costmap = build_costmap(_room_grid(), PLANNING, INSCRIBED)
-    assert math.isinf(costmap.cost_at(2.0, 1.5 + 0.1 + INSCRIBED - 0.04))  # too close to the pillar
+    assert math.isinf(costmap.cost_at(2.0, 1.5 + 0.1 + INSCRIBED - 0.06))  # too close (by more than a cell)
     assert math.isfinite(costmap.cost_at(2.0, 1.5 + 0.1 + INSCRIBED + 0.06))
     near = costmap.cost_at(1.0, 0.05 + INSCRIBED + 0.06)
     far = costmap.cost_at(1.0, 1.0)
@@ -106,7 +106,7 @@ def test_remembered_bumps_become_obstacles() -> None:
     sock = np.array([[1.0, 2.0]])
     bumped = build_costmap(grid, PLANNING, INSCRIBED, extra_obstacles=sock)
     assert math.isfinite(plain.cost_at(1.0, 2.0)) and math.isinf(bumped.cost_at(1.0, 2.0))
-    assert math.isinf(bumped.cost_at(1.0 + PLANNING.bump_radius + INSCRIBED - 0.03, 2.0))
+    assert math.isinf(bumped.cost_at(1.0 + PLANNING.bump_radius + INSCRIBED - 0.06, 2.0))
 
 
 def test_a_path_through_the_room_goes_round_the_pillar_with_clearance() -> None:
@@ -116,3 +116,35 @@ def test_a_path_through_the_room_goes_round_the_pillar_with_clearance() -> None:
     points = np.array([costmap.centre(c) for c in path])
     assert np.hypot(points[:, 0] - 2.0, points[:, 1] - 1.5).min() >= 0.1 + INSCRIBED - 1e-9
     assert costmap.nearest_traversable(0.12, 1.5) is not None  # from inside a lethal band, step out
+
+
+def _gap_grid(free_cells: int) -> tuple[OccupancyGrid, float, float]:
+    """Two cabinets against the bottom wall, ``free_cells`` known-free cells apart (a dead-end gap)."""
+    grid = _room_grid()
+    centres_x = grid.origin[0] + (np.arange(grid.shape[1]) + 0.5) * grid.resolution
+    centres_y = grid.origin[1] + (np.arange(grid.shape[0]) + 0.5) * grid.resolution
+    gx, gy = np.meshgrid(centres_x, centres_y)
+    left = 1.8  # a cell boundary: the last occupied centre is 1.775
+    right = left + free_cells * grid.resolution
+    grid.log_odds[(gy < 1.0) & (((gx > 0.5) & (gx < left)) | ((gx > right) & (gx < 3.5)))] = 3.5
+    return grid, left, right
+
+
+def test_a_gap_the_robot_fits_by_less_than_a_cell_is_lethal() -> None:
+    """Measured in the apartment: the planner sent the robot nose-first into 40 cm gaps (3 cm a side) along a
+    strip of passable cells one cell wide, and DWA's margin could not get it out again."""
+    grid, left, right = _gap_grid(7)  # 35 cm of free cells; on the map the robot would fit, by a hair
+    plain = build_costmap(grid, PLANNING, INSCRIBED)
+    centres_x = plain.origin[0] + (np.arange(plain.shape[1]) + 0.5) * plain.resolution
+    centres_y = plain.origin[1] + (np.arange(plain.shape[0]) + 0.5) * plain.resolution
+    middle = int(np.argmin(np.abs(centres_x - 0.5 * (left + right))))
+    assert plain.clearance[plain.cell(0.5 * (left + right), 0.5)] >= INSCRIBED  # wide enough by clearance alone...
+    rows = (centres_y > 0.2) & (centres_y < 0.8)
+    assert not plain.traversable[rows, middle].any()  # ...but a one-cell strip is not trusted
+    assert math.isfinite(plain.cost_at(1.0, 2.0))  # the rest of the room is fine
+
+
+def test_a_gap_with_room_to_spare_stays_open() -> None:
+    grid, left, right = _gap_grid(12)  # 60 cm: 13 cm a side beyond the body
+    costmap = build_costmap(grid, PLANNING, INSCRIBED)
+    assert math.isfinite(costmap.cost_at(0.5 * (left + right), 0.5))

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 
+from roombacalypse.autonomy.executive import Executive
 from roombacalypse.autonomy.teleop import TeleopController
 from roombacalypse.autonomy.wander import WanderBehaviour
 from roombacalypse.core.config import AppConfig
@@ -57,6 +58,10 @@ class RobotBrain:
         self.wander = WanderBehaviour(
             config.robot, config.wander, config.dwa, config.simulation.control_period, publish
         )
+        self.executive = Executive(
+            config.robot, config.planning, config.dwa, config.wander, config.simulation.control_period,
+            lambda: self.slam.grid_snapshot, publish,
+        )
         self.initial_mode = mode
         self.mode = mode
         self.obstacle_range = max(config.dwa.obstacle_range, config.wander.goal_max_distance + 0.5)
@@ -66,11 +71,17 @@ class RobotBrain:
         self.last_bumper = BumperReading()
         self.bumps = 0
         self._loops_reported = 0
+        self._relocalizations_reported = 0
         self._was_lost = False
 
     @property
     def name(self) -> str:
         return self.mode.value
+
+    @property
+    def behaviour(self) -> Executive | WanderBehaviour:
+        """The autonomous behaviour in use: coverage (M4) or map-free wandering (M2)."""
+        return self.executive if self.config.autonomy.behaviour == "coverage" else self.wander
 
     @property
     def pose(self) -> Pose2D:
@@ -83,9 +94,11 @@ class RobotBrain:
         self.odometry.reset()
         self.slam.reset()
         self._loops_reported = 0
+        self._relocalizations_reported = 0
         self._was_lost = False
         self.memory.reset()
         self.wander.reset(streams.get("robot.wander"), docked=True)  # it boots on its dock, and knows it
+        self.executive.reset(streams.get("robot.executive"), docked=True)
         self.mode = self.initial_mode
         self.time = 0.0
         self.last_scan = None
@@ -98,7 +111,7 @@ class RobotBrain:
         self.mode = mode
         self.teleop.set_intent(0.0, 0.0)
         if mode is Mode.AUTONOMOUS:
-            self.wander.activate()
+            self.behaviour.activate()
         self._emit(EventKind.MODE, f"mode: {mode.value}", mode=mode.value)
 
     def toggle_mode(self) -> Mode:
@@ -120,8 +133,14 @@ class RobotBrain:
                        correction=closure.correction)
         lost = self.slam.lost
         if lost and not self._was_lost:
-            self._emit(EventKind.MAP, "scan does not fit the map: dead reckoning", score=self.slam.tracking_score)
+            self._emit(EventKind.MAP, "lost: the scans fit nowhere near where I think I am",
+                       score=self.slam.tracking_score)
         self._was_lost = lost
+        if len(self.slam.relocalizations) > self._relocalizations_reported:
+            found = self.slam.relocalizations[-1]
+            self._relocalizations_reported = len(self.slam.relocalizations)
+            self._emit(EventKind.MAP, f"found myself {found.jump:.1f} m from where I thought, after "
+                       f"{found.time - found.lost_at:.0f} s", jump=found.jump, attempts=found.attempts)
         if frame.lidar is not None:
             self.last_scan = frame.lidar
             self.memory.update_scan(frame.lidar, pose)
@@ -139,4 +158,6 @@ class RobotBrain:
             return self.teleop.update(frame, dt)
         obstacles = self.memory.points_in_body(pose, self.obstacle_range)
         ready = self.last_scan is not None and not self.odometry.calibrating  # sit still on the dock until then
+        if self.behaviour is self.executive:
+            return self.executive.update(frame.time, self.odometry, map_pose, obstacles, new_bump, ready, lost=lost)
         return self.wander.update(frame.time, self.odometry, obstacles, new_bump, ready, map_pose)

@@ -401,20 +401,37 @@ class SlamConfig:
     """Cauchy kernel scale on loop-closure constraints, in standard deviations."""
     optimizer_iterations: int = 15
     """Maximum Levenberg-Marquardt iterations per pose-graph optimisation."""
+    lost_after: int = 3
+    """Consecutive keyframes that fit nowhere near the prediction before the robot declares itself lost
+    (kidnapped) and starts searching the whole map."""
+    relocalize_interval: float = 1.0
+    """Simulated time between two global searches while lost [s]."""
+    relocalize_sigma: float = 0.075
+    """Width of the likelihood around occupied cells in the global search [m]."""
+    relocalize_clearance: float = 0.1
+    """The global search only considers places with at least this much room on the map [m]."""
+    relocalize_min_score: float = 0.6
+    """Mean likelihood the refined global match needs."""
+    relocalize_max_ambiguity: float = 0.85
+    """Do not relocalise if a clearly different place scores this fraction of the best one (wait for a more
+    telling view instead)."""
 
     def __post_init__(self) -> None:
         _require(self.node_distance > 0.0 and self.node_angle_deg > 0.0, "slam node thresholds must be positive")
+        _require(self.lost_after >= 1, "slam.lost_after must be >= 1")
         _require(self.local_map_nodes >= 1 and self.loop_chain_nodes >= 1, "slam node counts must be >= 1")
         _require(0.0 < self.scan_voxel < 0.5, "slam.scan_voxel must be in (0, 0.5)")
         _require(0.0 < self.field_resolution <= self.field_sigma, "slam needs 0 < field_resolution <= field_sigma")
-        for name in ("track_min_score", "loop_min_score", "loop_max_ambiguity"):
+        for name in ("track_min_score", "loop_min_score", "loop_max_ambiguity", "relocalize_min_score",
+                     "relocalize_max_ambiguity"):
             _require(0.0 < getattr(self, name) < 1.0, f"slam.{name} must be in (0, 1)")
         for name in ("track_window", "track_window_deg", "loop_window", "loop_window_deg", "match_point_std",
-                     "loop_search_radius", "loop_interval", "loop_robust_scale"):
+                     "loop_search_radius", "loop_interval", "loop_robust_scale", "relocalize_interval",
+                     "relocalize_sigma"):
             _require(getattr(self, name) > 0.0, f"slam.{name} must be positive")
         for name in ("prior_translation_weight", "prior_rotation_weight", "odometry_translation_noise",
                      "odometry_rotation_noise", "odometry_heading_drift", "gyro_rotation_noise", "gyro_heading_drift",
-                     "loop_min_travel"):
+                     "loop_min_travel", "relocalize_clearance"):
             _require(getattr(self, name) >= 0.0, f"slam.{name} must be >= 0")
         _require(self.optimizer_iterations >= 1, "slam.optimizer_iterations must be >= 1")
 
@@ -423,8 +440,9 @@ class SlamConfig:
 class PlanningConfig:
     """Costmap, path planning and coverage (Milestone 4, docs/algorithms/planning.md)."""
 
-    extra_margin: float = 0.01
-    """Clearance planned beyond the body radius and the DWA safety margin [m]."""
+    extra_margin: float = 0.0
+    """Clearance planned beyond the body radius and the DWA safety margin [m]. Every centimetre here is a
+    centimetre of floor along every wall that never gets swept."""
     cost_scale: float = 2.0
     """Extra cost per metre right at the lethal boundary (open floor costs 1 per metre)."""
     cost_decay: float = 0.1

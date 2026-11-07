@@ -23,6 +23,7 @@ class EventKind(StrEnum):
     BEHAVIOUR = "behaviour"  # robot: new goal, escape manoeuvre, stall, ...
     MAP = "map"  # robot: loop closed (map corrected), scan did not fit the map
     WORLD_EDIT = "world_edit"  # user: obstacle placed or removed
+    KIDNAP = "kidnap"  # user: robot picked up and put down elsewhere (the robot is not told)
 
 
 @dataclass(frozen=True, slots=True)

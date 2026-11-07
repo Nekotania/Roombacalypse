@@ -109,7 +109,7 @@ undock_distance = 0.3      # back straight off the dock this far before explorin
 behaviour = "coverage"     # "coverage" (M4: plan and clean the whole map) or "wander" (M2: map-free)
 
 [planning]                 # costmap, paths and coverage (docs/algorithms/planning.md)
-extra_margin = 0.01        # planned clearance beyond body radius + DWA safety margin [m]
+extra_margin = 0.0         # planned clearance beyond body radius + DWA safety margin [m]
 cost_scale = 2.0           # extra cost per metre at the lethal boundary (open floor: 1 per metre)
 cost_decay = 0.1           # ...falling by a factor e over this distance [m]
 unknown_cost = 3.0         # extra cost per metre through never-seen cells
@@ -157,6 +157,12 @@ loop_min_score = 0.6       # mean likelihood a loop closure needs
 loop_max_ambiguity = 0.9   # reject if a clearly different pose scores this fraction of the best
 loop_robust_scale = 2.0    # Cauchy kernel on loop closures [standard deviations]
 optimizer_iterations = 15  # Levenberg-Marquardt iterations per pose-graph optimisation
+lost_after = 3             # keyframes in a row that fit nowhere: lost (kidnapped), search the whole map
+relocalize_interval = 1.0  # time between global searches while lost [s]
+relocalize_sigma = 0.075   # likelihood width around occupied cells in the global search [m]
+relocalize_clearance = 0.1 # only look for the robot where the map has this much room [m]
+relocalize_min_score = 0.6 # mean likelihood the refined global match needs
+relocalize_max_ambiguity = 0.85  # wait for a better view if another place scores this fraction of the best
 
 [viewer]
 width = 1280               # window size [px]

@@ -47,6 +47,8 @@ class Overlays:
     """Latest DWA decision; its arcs are in the body frame and drawn from the current true pose."""
     goal: Point | None = None
     """Exploration goal in world coordinates (as the robot believes it)."""
+    path: list[Point] = field(default_factory=list)
+    """The planned path in world coordinates (as the robot believes it)."""
     belief: Pose2D | None = None
     """Where the robot's odometry thinks it is, in world coordinates."""
     slam_belief: Pose2D | None = None
@@ -59,6 +61,9 @@ class Overlays:
     """Keyframe positions ``(n, 2)`` in world coordinates."""
     graph_loops: list[tuple[int, int]] = field(default_factory=list)
     """Loop-closure constraints as pairs of keyframe indices."""
+    coverage: tuple[np.ndarray, Point, float, object] | None = None
+    """A map-frame RGBA raster ``(image, origin, resolution, version)`` of what the robot believes it swept
+    and what it still means to sweep, drawn through ``map_pose``."""
 
 
 class WorldRenderer:
@@ -71,6 +76,8 @@ class WorldRenderer:
         self._overlay: pygame.Surface | None = None
         self._map: tuple[pygame.Surface, tuple[float, float]] | None = None
         self._map_key: object = None
+        self._raster: tuple[pygame.Surface, tuple[float, float]] | None = None
+        self._raster_key: object = None
 
     def draw(
         self,
@@ -225,8 +232,19 @@ class WorldRenderer:
     def _draw_overlays(self, overlay: pygame.Surface, camera: Camera, pose: Pose2D, layers: Overlays) -> None:
         if layers.grid is not None and layers.map_pose is not None:
             self._draw_map(overlay, camera, layers.grid, layers.map_pose)
+        if layers.coverage is not None and layers.map_pose is not None:
+            image, origin, resolution, version = layers.coverage
+            key = (version, camera.key, layers.map_pose, overlay.get_size())
+            if self._raster_key != key:
+                self._raster = self._render_raster(camera, image, origin, resolution, layers.map_pose)
+                self._raster_key = key
+            if self._raster is not None:
+                overlay.blit(self._raster[0], self._raster[1])
         if layers.graph_nodes is not None:
             self._draw_graph(overlay, camera, layers.graph_nodes, layers.graph_loops)
+        if len(layers.path) >= 2:
+            points = [camera.to_screen(x, y) for x, y in layers.path]
+            pygame.draw.lines(overlay, palette.PATH, False, points, 2)
         if layers.plan is not None:
             self._draw_plan(overlay, camera, pose, layers.plan)
         if layers.goal is not None:
@@ -251,24 +269,32 @@ class WorldRenderer:
     @staticmethod
     def _render_map(camera: Camera, grid: OccupancyGrid, map_pose: Pose2D
                     ) -> tuple[pygame.Surface, tuple[float, float]] | None:
-        rows, cols = grid.shape
+        if grid.log_odds.size == 0:
+            return None
+        rgba = np.zeros((*grid.log_odds.shape, 4), dtype=np.uint8)
+        rgba[grid.log_odds < grid.config.free_log_odds] = palette.MAP_FREE
+        rgba[grid.log_odds > grid.config.occupied_log_odds] = palette.MAP_OCCUPIED
+        return WorldRenderer._render_raster(camera, rgba, grid.origin, grid.resolution, map_pose)
+
+    @staticmethod
+    def _render_raster(camera: Camera, rgba: np.ndarray, origin: Point, res: float, map_pose: Pose2D
+                       ) -> tuple[pygame.Surface, tuple[float, float]] | None:
+        """A map-frame RGBA raster (row 0 = lowest y), cropped to the view, scaled and rotated into the world."""
+        rows, cols = rgba.shape[:2]
         if rows == 0 or cols == 0:
             return None
         left, top, width, height = camera.viewport
         corners = [map_pose.inverse_transform_point(*camera.to_world(sx, sy))
                    for sx, sy in ((left, top), (left + width, top), (left, top + height), (left + width, top + height))]
-        res, (ox, oy) = grid.resolution, grid.origin
+        ox, oy = origin
         c0 = max(0, math.floor((min(c[0] for c in corners) - ox) / res) - 1)
         c1 = min(cols, math.ceil((max(c[0] for c in corners) - ox) / res) + 1)
         r0 = max(0, math.floor((min(c[1] for c in corners) - oy) / res) - 1)
         r1 = min(rows, math.ceil((max(c[1] for c in corners) - oy) / res) + 1)
         if c0 >= c1 or r0 >= r1:
             return None
-        cells = grid.log_odds[r0:r1, c0:c1]
-        rgba = np.zeros((*cells.shape, 4), dtype=np.uint8)
-        rgba[cells < grid.config.free_log_odds] = palette.MAP_FREE
-        rgba[cells > grid.config.occupied_log_odds] = palette.MAP_OCCUPIED
-        image = pygame.image.frombuffer(np.ascontiguousarray(rgba[::-1]).tobytes(), (c1 - c0, r1 - r0), "RGBA")
+        crop = rgba[r0:r1, c0:c1]
+        image = pygame.image.frombuffer(np.ascontiguousarray(crop[::-1]).tobytes(), (c1 - c0, r1 - r0), "RGBA")
         size = (max(1, round((c1 - c0) * res * camera.scale)), max(1, round((r1 - r0) * res * camera.scale)))
         image = pygame.transform.rotate(pygame.transform.scale(image, size), math.degrees(map_pose.theta))
         centre = camera.to_screen(*map_pose.transform_point(ox + 0.5 * (c0 + c1) * res, oy + 0.5 * (r0 + r1) * res))

@@ -7,7 +7,12 @@ Built from the SLAM occupancy grid (same lattice, map frame), as a ROS costmap i
 * **lethal**: every cell closer than ``inscribed = radius + DWA safety margin +
   extra margin`` to an obstacle. The robot's centre must not be there, which
   is exactly what the local planner would refuse anyway (so a plan never
-  asks DWA for the impossible);
+  asks DWA for the impossible). Strips of passable cells only one cell
+  wide are lethal too: the robot fits there by less than the map's
+  resolution, which the map cannot vouch for. In the M4 apartment runs, every
+  robot that declared itself trapped had followed such a strip nose-first
+  into a dead end 40 cm wide (between a sofa and an armchair, or a wall and
+  a kitchen counter) and could not get out with its safety margin;
 * **cost** beyond that decays exponentially with clearance, so shortest paths
   keep away from furniture where they can;
 * **unknown** cells (never observed) are passable at a premium: plans prefer
@@ -79,7 +84,7 @@ class Costmap:
         cell = self.cell(x, y)
         return float(self.cost[cell]) if self.inside(cell) else math.inf
 
-    def nearest_traversable(self, x: float, y: float, search: float = 0.3) -> Cell | None:
+    def nearest_traversable(self, x: float, y: float, search: float = 0.5) -> Cell | None:
         """The traversable cell nearest to (x, y) within ``search`` metres (the robot may sit in a lethal cell
         after slipping close to something; planning has to start from somewhere it may be)."""
         centre = self.cell(x, y)
@@ -118,5 +123,6 @@ def build_costmap(grid: OccupancyGrid, config: PlanningConfig, inscribed: float,
     clearance = ndimage.distance_transform_edt(~occupied) * res if occupied.any() else np.full(occupied.shape, np.inf)
     cost = config.cost_scale * np.exp(-np.maximum(clearance - inscribed, 0.0) / config.cost_decay)
     cost = cost + np.where(unknown, config.unknown_cost, 0.0)
-    cost = np.where(clearance < inscribed, np.inf, cost)
+    passable = ndimage.binary_opening(clearance >= inscribed, structure=np.ones((2, 2), dtype=bool))
+    cost = np.where(passable, cost, np.inf)
     return Costmap(grid.origin, res, cost, clearance, free & ~occupied, unknown, occupied, inscribed)

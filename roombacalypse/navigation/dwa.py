@@ -78,9 +78,11 @@ class DynamicWindowPlanner:
         self.collision_radius = spec.radius + config.safety_margin
         self.min_radius = spec.radius + min(_MIN_CLEARANCE, config.safety_margin)
 
-    def window(self, wheel_speeds: tuple[float, float]) -> tuple[np.ndarray, np.ndarray]:
-        """Candidate (v, ω) pairs reachable within one control period."""
+    def window(self, wheel_speeds: tuple[float, float], speed_cap: float | None = None
+               ) -> tuple[np.ndarray, np.ndarray]:
+        """Candidate (v, ω) pairs reachable within one control period, at most ``speed_cap`` fast."""
         spec, cfg = self.spec, self.config
+        top = cfg.max_speed if speed_cap is None else min(cfg.max_speed, max(speed_cap, 0.0))
         reach = spec.max_wheel_accel * self.control_period
         limit = spec.max_wheel_speed
         axes = []
@@ -93,7 +95,7 @@ class DynamicWindowPlanner:
         v = 0.5 * (v_left + v_right)
         w = (v_right - v_left) / spec.wheel_base
         violation = np.maximum.reduce(
-            [-v, v - cfg.max_speed, np.abs(w) - cfg.max_angular_speed, np.zeros_like(v)]
+            [-v, v - top, np.abs(w) - cfg.max_angular_speed, np.zeros_like(v)]
         )
         keep = violation <= 1e-9
         if not keep.any():
@@ -159,10 +161,15 @@ class DynamicWindowPlanner:
         intrusion = np.clip((margin - gap.min(axis=1)) / margin, 0.0, 1.0) if margin > 0 else np.zeros(count)
         return free_time, gap.mean(axis=1) / reach, intrusion
 
-    def plan(self, wheel_speeds: tuple[float, float], goal: Point, obstacles: np.ndarray) -> DwaPlan:
-        """Choose a command that heads for ``goal`` (body frame) while avoiding ``obstacles`` (body frame)."""
+    def plan(self, wheel_speeds: tuple[float, float], goal: Point, obstacles: np.ndarray,
+             speed_cap: float | None = None) -> DwaPlan:
+        """Choose a command that heads for ``goal`` (body frame) while avoiding ``obstacles`` (body frame).
+
+        ``speed_cap`` lowers the cruise speed for this cycle (the coverage executive
+        slows down near walls and at the end of a lane).
+        """
         cfg = self.config
-        v, w = self.window(wheel_speeds)
+        v, w = self.window(wheel_speeds, speed_cap)
         v0, w0 = wheel_speeds_to_twist(wheel_speeds[0], wheel_speeds[1], self.spec.wheel_base)
         x, y, theta = self.predict(v, w, v0, w0)
         free_time, clearance, intrusion = self.clearance(x, y, obstacles)
