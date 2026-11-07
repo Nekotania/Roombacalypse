@@ -191,7 +191,7 @@ annotated and shows every shape type and the `table` and `chair` macros.
 
 ```bash
 pytest                                                          # ~470 tests, ~45 s
-pytest -m slow                                                  # milestone acceptance runs, ~35 min
+pytest -m slow                                                  # milestone acceptance runs, ~27 min
 uvx ruff check roombacalypse tests                              # lint (optional tool)
 uvx mypy roombacalypse --python-executable .venv/bin/python     # type check (optional tool)
 ```

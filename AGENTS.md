@@ -83,7 +83,7 @@ The licence is MIT and confirmed; the copyright holder is in `LICENSE`.
 
 ```bash
 .venv/bin/python -m pytest -q                       # fast suite (~470 tests, ~45 s)
-.venv/bin/python -m pytest -q -m slow               # acceptance scenarios (~35 min), skipped by default
+.venv/bin/python -m pytest -q -m slow               # acceptance scenarios (~27 min), skipped by default
 uvx ruff check roombacalypse tests main.py          # lint (line length 120)
 uvx mypy roombacalypse --python-executable .venv/bin/python
 # Python 3.12 compatibility (throwaway venv):
