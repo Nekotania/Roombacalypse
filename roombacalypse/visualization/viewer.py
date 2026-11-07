@@ -20,6 +20,7 @@ import pygame
 
 from roombacalypse.autonomy.brain import Mode, RobotBrain
 from roombacalypse.core.config import ViewerConfig
+from roombacalypse.core.events import EventKind
 from roombacalypse.core.geometry import Point, transform_points
 from roombacalypse.environment.catalog import PLACEABLE
 from roombacalypse.environment.shapes import Shape
@@ -30,6 +31,7 @@ from roombacalypse.simulation.engine import Simulation
 from roombacalypse.visualization import hud
 from roombacalypse.visualization.camera import Camera
 from roombacalypse.visualization.renderer import Overlays, WorldRenderer
+from roombacalypse.visualization.sound import CollisionSound
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +54,7 @@ HELP_LINES: tuple[tuple[str, str], ...] = (
     ("M", "the robot's map (occupancy grid)"),
     ("P", "pose graph: keyframes and loop closures"),
     ("T", "trail"),
+    ("V", "collision sound on/off"),
     ("Left click", "place obstacle"),
     ("O", "cycle obstacle type"),
     ("X", "remove obstacle under cursor"),
@@ -77,6 +80,7 @@ class Viewer:
     ) -> None:
         if offscreen:
             os.environ["SDL_VIDEODRIVER"] = "dummy"
+            os.environ["SDL_AUDIODRIVER"] = "dummy"  # sounds "play" silently, and no device is needed
         pygame.init()
         pygame.display.set_caption("ROOMBACALYPSE")
         self.screen = pygame.display.set_mode((config.width, config.height))
@@ -89,6 +93,8 @@ class Viewer:
         self.camera = self._fit_camera()
         self.renderer = WorldRenderer(sim.spec)
         self.fonts = hud.Fonts()
+        self.sound = CollisionSound(config.collision_sound, config.sound_volume, config.sound_cooldown)
+        self._event_cursor = 0
 
         self.speed_index = min(range(len(SPEED_STEPS)), key=lambda i: abs(SPEED_STEPS[i] - config.speed_factor))
         self.paused = False
@@ -167,6 +173,7 @@ class Viewer:
             if self._step_once:
                 self._step()
                 self._step_once = False
+                self._listen()
             return
         self._accumulator += min(frame_seconds, 0.1) * self.speed
         steps = 0
@@ -180,6 +187,13 @@ class Viewer:
         if frame_seconds > 0.0:
             achieved = steps * sim.dt / frame_seconds
             self._achieved_speed += 0.1 * (achieved - self._achieved_speed)
+        self._listen()
+
+    def _listen(self) -> None:
+        """Play the collision sound if the simulator reported a new contact since the last frame."""
+        events, self._event_cursor = self.sim.events.since(self._event_cursor)
+        if any(event.kind is EventKind.COLLISION for event in events):
+            self.sound.play(self._clock_seconds)
 
     def _step(self) -> None:
         self.sim.step()
@@ -194,6 +208,7 @@ class Viewer:
 
     def _reset(self, seed: int | None = None) -> None:
         self.sim.reset(seed)
+        self._event_cursor = 0
         self.trail.clear()
         self.coverage = self._new_coverage()
         self._last_trail_time = -1.0
@@ -263,6 +278,11 @@ class Viewer:
                 self.toast("Purple: dead reckoning. Green: SLAM.")
         elif key == pygame.K_t:
             self.show_trail = not self.show_trail
+        elif key == pygame.K_v:
+            if not self.sound.available:
+                self.toast("No collision sound: start with --sound FILE (or --sound bonk).")
+            else:
+                self.toast("Collision sound on." if self.sound.toggle() else "Collision sound off.")
         elif key == pygame.K_m:
             self.show_map = not self.show_map
             if self.show_map:

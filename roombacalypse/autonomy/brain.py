@@ -51,8 +51,8 @@ class RobotBrain:
         self.config = config
         self.spec = config.robot
         self.teleop = TeleopController(config.teleop)
-        self.odometry = OdometryTracker(config.robot, config.encoders)
-        self.slam = GraphSlam(config.mapping, config.slam)
+        self.odometry = OdometryTracker(config.robot, config.encoders, config.odometry)
+        self.slam = GraphSlam(config.mapping, config.slam, gyro=config.gyro.enabled and config.odometry.use_gyro)
         self.memory = ObstacleMemory(config.wander.bump_memory_seconds)
         self.wander = WanderBehaviour(
             config.robot, config.wander, config.dwa, config.simulation.control_period, publish
@@ -85,7 +85,7 @@ class RobotBrain:
         self._loops_reported = 0
         self._was_lost = False
         self.memory.reset()
-        self.wander.reset(streams.get("robot.wander"))
+        self.wander.reset(streams.get("robot.wander"), docked=True)  # it boots on its dock, and knows it
         self.mode = self.initial_mode
         self.time = 0.0
         self.last_scan = None
@@ -111,7 +111,7 @@ class RobotBrain:
 
     def update(self, frame: SensorFrame, dt: float) -> DriveCommand:
         self.time = frame.time
-        pose = self.odometry.update(frame.encoders, frame.time)
+        pose = self.odometry.update(frame.encoders, frame.time, frame.gyro)
         map_pose = self.slam.update(frame.time, pose, frame.lidar)
         if len(self.slam.loop_closures) > self._loops_reported:
             closure = self.slam.loop_closures[-1]
@@ -138,4 +138,5 @@ class RobotBrain:
         if self.mode is Mode.MANUAL:
             return self.teleop.update(frame, dt)
         obstacles = self.memory.points_in_body(pose, self.obstacle_range)
-        return self.wander.update(frame.time, self.odometry, obstacles, new_bump, self.last_scan is not None, map_pose)
+        ready = self.last_scan is not None and not self.odometry.calibrating  # sit still on the dock until then
+        return self.wander.update(frame.time, self.odometry, obstacles, new_bump, ready, map_pose)

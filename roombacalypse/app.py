@@ -50,6 +50,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--screenshot", type=Path, metavar="PNG",
                         help="render offscreen for --frames frames, save a screenshot and exit")
     parser.add_argument("--frames", type=int, default=60, help="frames to render with --screenshot (default 60)")
+    parser.add_argument("--sound", metavar="FILE",
+                        help="play FILE (WAV/OGG) whenever the robot hits something; 'bonk' for the built-in sound")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     return parser
 
@@ -61,6 +63,8 @@ def load_app_config(args: argparse.Namespace) -> AppConfig:
     config = load_config(paths, args.overrides)
     if args.room:
         config = dataclasses.replace(config, room=args.room)
+    if args.sound is not None:
+        config = dataclasses.replace(config, viewer=dataclasses.replace(config.viewer, collision_sound=args.sound))
     if args.seed is not None:  # replace() re-runs validation
         config = dataclasses.replace(config, simulation=dataclasses.replace(config.simulation, seed=args.seed))
     return config

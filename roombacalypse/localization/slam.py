@@ -142,9 +142,11 @@ def _constraint_information(scan_information: np.ndarray, floor: tuple[float, fl
 class GraphSlam:
     """Keyframes, scan matching, loop closure and pose-graph optimisation; implements :class:`Slam`."""
 
-    def __init__(self, mapping: MappingConfig, config: SlamConfig) -> None:
+    def __init__(self, mapping: MappingConfig, config: SlamConfig, *, gyro: bool = False) -> None:
         self.mapping_config = mapping
         self.config = config
+        self.gyro = gyro
+        """Whether odometry headings come from a gyro (selects the odometry noise model)."""
         self.matcher = ScanMatcher(config)
         self.graph = PoseGraph()
         self.keyframes: list[Keyframe] = []
@@ -256,7 +258,7 @@ class GraphSlam:
             result = self._track(points, predicted)
             tracked = result.score >= _LOST_SCORE
             pose = result.pose if tracked else predicted
-            information = self._odometry_information(step)
+            information = self._odometry_information(step, time - previous.time)
             if tracked:
                 information = information + _constraint_information(result.information, _SCAN_FLOOR)
             index = self.graph.add_node(pose)
@@ -286,14 +288,16 @@ class GraphSlam:
                 result = wide
         return result
 
-    def _odometry_information(self, step: Pose2D) -> np.ndarray:
+    def _odometry_information(self, step: Pose2D, elapsed: float) -> np.ndarray:
+        """Information of an odometry step, from the robot's own noise model of its wheels (and gyro)."""
         cfg = self.config
         distance = math.hypot(step.x, step.y)
         sigma_xy = max(cfg.odometry_translation_noise * distance, _ODOMETRY_FLOOR[0])
-        sigma_theta = max(
-            cfg.odometry_rotation_noise * abs(step.theta) + cfg.odometry_heading_drift * distance, _ODOMETRY_FLOOR[1]
-        )
-        return _information((sigma_xy, sigma_xy, sigma_theta))
+        if self.gyro:
+            sigma_theta = cfg.gyro_rotation_noise * abs(step.theta) + cfg.gyro_heading_drift * max(elapsed, 0.0)
+        else:
+            sigma_theta = cfg.odometry_rotation_noise * abs(step.theta) + cfg.odometry_heading_drift * distance
+        return _information((sigma_xy, sigma_xy, max(sigma_theta, _ODOMETRY_FLOOR[1])))
 
     def _reference(self, indices: list[int], margin: float, near: Pose2D | None = None) -> LikelihoodField:
         """A surface field from the given keyframes' scans at their current poses (map frame)."""

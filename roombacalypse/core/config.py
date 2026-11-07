@@ -178,6 +178,51 @@ class EncoderConfig:
 
 
 @dataclass(frozen=True)
+class GyroConfig:
+    """Yaw-rate gyroscope: the MEMS IMU every robot vacuum carries (datasheet figures).
+
+    The robot's software may read these, as it may read any spec sheet. Each
+    individual sensor's actual turn-on bias and scale error are drawn from
+    them per reset and stay hidden in the simulator. Defaults are typical of
+    a consumer 6-axis IMU (e.g. Bosch BMI160 class) after factory calibration.
+    """
+
+    enabled: bool = True
+    """Whether the robot has a gyro at all."""
+    noise_density_deg: float = 0.01
+    """Angle random walk [deg/√s] (white rate noise)."""
+    bias_std_deg: float = 0.5
+    """Turn-on bias spread [deg/s]: each power-up draws a new constant bias."""
+    bias_walk_deg: float = 0.0005
+    """Bias random walk [deg/s/√s]: how fast the bias wanders after power-up."""
+    scale_error_std: float = 0.003
+    """Relative spread of the scale-factor error."""
+    resolution_deg: float = 0.0076
+    """Rate quantisation [deg/s] (16 bits over ±250 deg/s)."""
+
+    def __post_init__(self) -> None:
+        for name in ("noise_density_deg", "bias_std_deg", "bias_walk_deg", "scale_error_std", "resolution_deg"):
+            _require(getattr(self, name) >= 0.0, f"gyro.{name} must be >= 0")
+        _require(self.scale_error_std < 0.2, "gyro.scale_error_std must be < 0.2")
+
+
+@dataclass(frozen=True)
+class OdometryConfig:
+    """How the robot's software turns wheel encoders (and the gyro) into a pose."""
+
+    use_gyro: bool = True
+    """Take heading changes from the gyro instead of the wheels ("gyrodometry"), if the robot has one."""
+    gyro_calibration_time: float = 3.0
+    """Seconds of standing still (on the dock at boot) used to measure the gyro's bias before driving off."""
+    bias_time_constant: float = 20.0
+    """Time constant of the bias estimate's update whenever the wheels stand still [s]."""
+
+    def __post_init__(self) -> None:
+        _require(self.gyro_calibration_time >= 0.0, "odometry.gyro_calibration_time must be >= 0")
+        _require(self.bias_time_constant > 0.0, "odometry.bias_time_constant must be positive")
+
+
+@dataclass(frozen=True)
 class DwaConfig:
     """Dynamic Window Approach local planner (see docs/algorithms/dwa.md)."""
 
@@ -248,6 +293,8 @@ class WanderConfig:
     """Escape turn rate [rad/s]."""
     bump_memory_seconds: float = 20.0
     """How long a bump location is remembered as an obstacle [s]."""
+    undock_distance: float = 0.3
+    """Back straight off the dock this far before exploring [m] (the robot boots facing its dock)."""
 
     def __post_init__(self) -> None:
         _require(0.0 < self.goal_min_distance < self.goal_max_distance, "wander goal distances out of order")
@@ -258,6 +305,7 @@ class WanderConfig:
         _require(self.backup_distance >= 0.0 and self.backup_speed > 0.0, "wander backup values out of range")
         _require(0.0 < self.turn_min_deg <= self.turn_max_deg < 180.0, "wander turn angles must be in (0, 180)")
         _require(self.turn_speed > 0.0 and self.bump_memory_seconds >= 0.0, "wander turn/memory values out of range")
+        _require(self.undock_distance >= 0.0, "wander.undock_distance must be >= 0")
 
 
 @dataclass(frozen=True)
@@ -328,6 +376,10 @@ class SlamConfig:
     """Odometry heading std per radian turned [rad/rad]."""
     odometry_heading_drift: float = 0.015
     """Odometry heading std per metre travelled (unequal wheels) [rad/m]."""
+    gyro_rotation_noise: float = 0.005
+    """Heading std per radian turned when heading comes from the gyro (its scale error) [rad/rad]."""
+    gyro_heading_drift: float = 0.0005
+    """Heading std per second when heading comes from the gyro (residual bias) [rad/s]."""
     loop_search_radius: float = 2.5
     """Old keyframes within this distance of the current estimate are loop-closure candidates [m]."""
     loop_min_travel: float = 5.0
@@ -361,9 +413,54 @@ class SlamConfig:
                      "loop_search_radius", "loop_interval", "loop_robust_scale"):
             _require(getattr(self, name) > 0.0, f"slam.{name} must be positive")
         for name in ("prior_translation_weight", "prior_rotation_weight", "odometry_translation_noise",
-                     "odometry_rotation_noise", "odometry_heading_drift", "loop_min_travel"):
+                     "odometry_rotation_noise", "odometry_heading_drift", "gyro_rotation_noise", "gyro_heading_drift",
+                     "loop_min_travel"):
             _require(getattr(self, name) >= 0.0, f"slam.{name} must be >= 0")
         _require(self.optimizer_iterations >= 1, "slam.optimizer_iterations must be >= 1")
+
+
+@dataclass(frozen=True)
+class PlanningConfig:
+    """Costmap, path planning and coverage (Milestone 4, docs/algorithms/planning.md)."""
+
+    extra_margin: float = 0.01
+    """Clearance planned beyond the body radius and the DWA safety margin [m]."""
+    cost_scale: float = 2.0
+    """Extra cost per metre right at the lethal boundary (open floor costs 1 per metre)."""
+    cost_decay: float = 0.1
+    """Distance over which that extra cost falls by a factor e [m]."""
+    unknown_cost: float = 3.0
+    """Extra cost per metre through cells the robot has never seen."""
+    bump_radius: float = 0.08
+    """Remembered bump locations become obstacle discs of this radius [m]."""
+    lane_width: float = 0.25
+    """Distance between boustrophedon lanes [m]; less than the robot's 0.34 m width, so lanes overlap."""
+    lookahead: float = 0.5
+    """The local planner steers for a point this far along the planned path [m]."""
+    goal_tolerance: float = 0.12
+    """A path or lane end counts as reached within this distance [m]."""
+    replan_interval: float = 1.0
+    """Seconds between costmap rebuilds while driving [s]."""
+    frontier_min_size: float = 0.25
+    """Frontiers (known floor next to unknown space) shorter than this are ignored [m]."""
+
+    def __post_init__(self) -> None:
+        for name in ("extra_margin", "cost_scale", "unknown_cost", "bump_radius"):
+            _require(getattr(self, name) >= 0.0, f"planning.{name} must be >= 0")
+        for name in ("cost_decay", "lane_width", "lookahead", "goal_tolerance", "replan_interval",
+                     "frontier_min_size"):
+            _require(getattr(self, name) > 0.0, f"planning.{name} must be positive")
+
+
+@dataclass(frozen=True)
+class AutonomyConfig:
+    """Which autonomous behaviour the robot runs."""
+
+    behaviour: str = "coverage"
+    """"coverage" (Milestone 4: plan and clean the whole map) or "wander" (Milestone 2: map-free exploration)."""
+
+    def __post_init__(self) -> None:
+        _require(self.behaviour in ("coverage", "wander"), "autonomy.behaviour must be 'coverage' or 'wander'")
 
 
 @dataclass(frozen=True)
@@ -433,6 +530,12 @@ class ViewerConfig:
     """Physics steps allowed per rendered frame before the loop drops time."""
     trail_seconds: float = 60.0
     """Length of the ground-truth trail drawn behind the robot [s]."""
+    collision_sound: str = ""
+    """Sound when the robot hits something: "" (off), "bonk" (built in) or the path of a WAV/OGG file."""
+    sound_volume: float = 0.8
+    """Collision sound volume in [0, 1]."""
+    sound_cooldown: float = 0.6
+    """Minimum wall-clock time between two collision sounds [s]."""
 
     def __post_init__(self) -> None:
         _require(self.width >= 640 and self.height >= 480, "viewer window must be at least 640x480")
@@ -441,6 +544,8 @@ class ViewerConfig:
         _require(self.speed_factor > 0.0, "viewer.speed_factor must be positive")
         _require(self.max_steps_per_frame >= 1, "viewer.max_steps_per_frame must be >= 1")
         _require(self.trail_seconds >= 0.0, "viewer.trail_seconds must be non-negative")
+        _require(0.0 <= self.sound_volume <= 1.0, "viewer.sound_volume must be in [0, 1]")
+        _require(self.sound_cooldown >= 0.0, "viewer.sound_cooldown must be non-negative")
 
 
 @dataclass(frozen=True)
@@ -455,11 +560,15 @@ class AppConfig:
     lidar: LidarConfig = field(default_factory=LidarConfig)
     bumper: BumperConfig = field(default_factory=BumperConfig)
     encoders: EncoderConfig = field(default_factory=EncoderConfig)
+    gyro: GyroConfig = field(default_factory=GyroConfig)
+    odometry: OdometryConfig = field(default_factory=OdometryConfig)
     dock: DockConfig = field(default_factory=DockConfig)
     physics: PhysicsConfig = field(default_factory=PhysicsConfig)
     teleop: TeleopConfig = field(default_factory=TeleopConfig)
     dwa: DwaConfig = field(default_factory=DwaConfig)
     wander: WanderConfig = field(default_factory=WanderConfig)
+    autonomy: AutonomyConfig = field(default_factory=AutonomyConfig)
+    planning: PlanningConfig = field(default_factory=PlanningConfig)
     mapping: MappingConfig = field(default_factory=MappingConfig)
     slam: SlamConfig = field(default_factory=SlamConfig)
     viewer: ViewerConfig = field(default_factory=ViewerConfig)

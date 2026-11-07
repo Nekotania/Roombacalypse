@@ -2,7 +2,8 @@
 
 A small state machine on top of the DWA local planner:
 
-* **WAIT** until the first LiDAR scan arrives.
+* **WAIT** until the first LiDAR scan arrives (and the gyro is calibrated);
+  if the robot is sitting on its dock, **UNDOCK** first: back straight off it.
 * **CRUISE** towards an exploration goal. Goals are chosen from the current
   scan: for each candidate direction, how far could the body travel (a swept
   disc against the scan points), scored by distance, by how rarely the robot
@@ -44,7 +45,8 @@ _GOAL_STANDOFF = 0.3  # stop this far short of the first obstacle in a direction
 _HOP_STANDOFF = 0.05  # cramped fallback: get this close to the first obstacle [m]
 _MIN_HOP = 0.08  # shorter hops than this are pointless [m]
 _BLOCKED_PATIENCE = 1.5  # seconds of "only turning is safe" before dropping a goal
-_BACK_OFF_TIMEOUT = 2.5  # [s]
+_BACK_OFF_TIMEOUT = 2.5  # [s] beyond the time the distance should take
+_DOCK_TOLERANCE = 0.02  # [m] of travel within which the robot still counts as sitting on its dock
 
 
 class WanderState(StrEnum):
@@ -111,17 +113,24 @@ class WanderBehaviour:
         self._blocked_since: float | None = None
         self._state_since = 0.0
         self._back_off_start = Pose2D(0.0, 0.0, 0.0)
+        self._back_off_distance = config.backup_distance
+        self._docked = False
         self._turn_start = 0.0
         self._turn_angle = 0.0
         self._turn_direction = 1.0
 
     # ------------------------------------------------------------------ lifecycle
 
-    def reset(self, rng: np.random.Generator) -> None:
-        """Forget everything, including where the robot has been."""
+    def reset(self, rng: np.random.Generator, *, docked: bool = False) -> None:
+        """Forget everything, including where the robot has been.
+
+        ``docked``: the robot is sitting on its dock facing it (as at boot), so it
+        first backs straight off the dock before exploring.
+        """
         self._rng = rng
         self.visits.reset()
         self.goals_chosen = self.escapes = self.abandoned = 0
+        self._docked = docked
         self.activate()
 
     def activate(self) -> None:
@@ -160,6 +169,9 @@ class WanderBehaviour:
             if not scan_ready:
                 return STOP
             self.state = WanderState.CRUISE
+            if self._docked and odometry.distance < _DOCK_TOLERANCE:
+                self._undock(time, odometry.pose, obstacles)
+            self._docked = False
         if self.state is WanderState.BACK_OFF:
             command = self._back_off(time, odometry.pose, obstacles)
             if command is not None:
@@ -285,21 +297,44 @@ class WanderBehaviour:
         if cfg.backup_distance > 0.0 and self._rear_free(obstacles) > cfg.backup_distance + 0.02:
             self.state = WanderState.BACK_OFF
             self._back_off_start = pose
+            self._back_off_distance = cfg.backup_distance
             self._state_since = time
             self._emit(time, f"bump on the {side}: backing off, then turning {math.degrees(angle):.0f}°", side=side)
         else:
             self._begin_turn(time, pose, direction, angle)
             self._emit(time, f"bump on the {side}, no room behind: turning {math.degrees(angle):.0f}°", side=side)
 
+    def _undock(self, time: float, pose: Pose2D, obstacles: np.ndarray) -> None:
+        """Back straight off the dock, as real robot vacuums do.
+
+        Docked, the robot sits 5 mm from the dock face, which is less than the
+        LiDAR's range noise (about 9 mm at that distance): planning a way out
+        among noisy points a few millimetres away can brush the dock. Reversing
+        needs no planning, and the LiDAR checks that the room behind is clear.
+        """
+        distance = self.config.undock_distance
+        if distance <= 0.0 or self._rear_free(obstacles) < distance + 0.02:
+            return
+        self.state = WanderState.BACK_OFF
+        self._back_off_start = pose
+        self._back_off_distance = distance
+        self._turn_angle = 0.0  # no turn afterwards: cruise picks a direction
+        self._state_since = time
+        self._emit(time, f"undocking: backing off {100 * distance:.0f} cm")
+
     def _rear_free(self, obstacles: np.ndarray) -> float:
         return float(swept_free_distance(obstacles, np.array([math.pi]), self.spec.radius + 0.01, 1.0)[0])
 
     def _back_off(self, time: float, pose: Pose2D, obstacles: np.ndarray) -> DriveCommand | None:
         moved = pose.distance_to(self._back_off_start)
-        if moved >= self.config.backup_distance or time - self._state_since > _BACK_OFF_TIMEOUT or (
+        timeout = _BACK_OFF_TIMEOUT + self._back_off_distance / self.config.backup_speed
+        if moved >= self._back_off_distance or time - self._state_since > timeout or (
             self._rear_free(obstacles) < 0.03
         ):
-            self._begin_turn(time, pose, self._turn_direction, self._turn_angle)
+            if self._turn_angle > 0.0:
+                self._begin_turn(time, pose, self._turn_direction, self._turn_angle)
+            else:
+                self.state = WanderState.CRUISE
             return None
         return DriveCommand(-self.config.backup_speed, 0.0)
 

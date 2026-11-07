@@ -10,7 +10,8 @@ Step order (every ``dt``):
 4. the wheel/ground model turns wheel rotation into true ground travel
    (calibration errors and slip); the pose is integrated exactly;
 5. the contact solver resolves collisions, possibly pushing obstacles;
-6. body state, bumper latches, collision events and the clock advance.
+6. body state, bumper latches, the gyro (which measures the *actual* yaw
+   rate), collision events and the clock advance.
 
 Deterministic: the same room, config, seed and controller give bit-identical
 runs (``tests/test_simulation.py``). Every random number comes from a named
@@ -39,6 +40,7 @@ from roombacalypse.robot.drivetrain import Drivetrain
 from roombacalypse.robot.wheels import WheelGroundModel
 from roombacalypse.sensors.bumper import Bumper
 from roombacalypse.sensors.encoders import WheelEncoders
+from roombacalypse.sensors.gyro import Gyro
 from roombacalypse.sensors.lidar import Lidar
 from roombacalypse.simulation.clock import SimClock, steps_per_period
 from roombacalypse.simulation.physics import ContactSolver
@@ -89,6 +91,7 @@ class Simulation:
         self.lidar: Lidar
         self.bumper: Bumper
         self.encoders: WheelEncoders
+        self.gyro: Gyro | None
         self.last_scan: LidarScan | None = None
         self.last_scan_pose: Pose2D | None = None
         self.command: DriveCommand = STOP
@@ -122,6 +125,7 @@ class Simulation:
         self.lidar = Lidar(self.config.lidar, self.rng.get("sensors.lidar"))
         self.bumper = Bumper(self.config.bumper)
         self.encoders = WheelEncoders(self.spec, self.config.encoders)
+        self.gyro = Gyro(self.config.gyro, self.rng.get("sensors.gyro")) if self.config.gyro.enabled else None
         self.last_scan = None
         self.last_scan_pose = None
         self._pending_scan = None
@@ -144,7 +148,8 @@ class Simulation:
 
     def sense(self) -> SensorFrame:
         """Build the frame handed to the controller; consumes the pending scan."""
-        frame = SensorFrame(self.time, self.encoders.read(self.robot), self.bumper.read(), self._pending_scan)
+        gyro = self.gyro.read() if self.gyro is not None else None
+        frame = SensorFrame(self.time, self.encoders.read(self.robot), self.bumper.read(), self._pending_scan, gyro)
         self._pending_scan = None
         return frame
 
@@ -182,6 +187,8 @@ class Simulation:
         body.travel_right += d_right
         body.contacts = result.contacts
         body.blocked = result.blocked
+        if self.gyro is not None:
+            self.gyro.observe(body.angular_velocity, dt)
         self.bumper.observe(body)
         self._record_collisions(result.contacts)
         self.clock.advance()
