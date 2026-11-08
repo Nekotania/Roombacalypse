@@ -16,20 +16,23 @@ from collections import deque
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 import pygame
 
 from roombacalypse.autonomy.brain import Mode, RobotBrain
 from roombacalypse.core.config import ViewerConfig
-from roombacalypse.core.geometry import Point, transform_points
+from roombacalypse.core.events import EventKind
+from roombacalypse.core.geometry import Point, Pose2D, transform_points
 from roombacalypse.environment.catalog import PLACEABLE
-from roombacalypse.environment.shapes import Shape
+from roombacalypse.environment.shapes import Circle, Shape
 from roombacalypse.environment.world import Obstacle
 from roombacalypse.evaluation.coverage import FootprintCoverage
 from roombacalypse.mapping.occupancy_grid import OccupancyGrid
 from roombacalypse.simulation.engine import Simulation
-from roombacalypse.visualization import hud
+from roombacalypse.visualization import hud, palette
 from roombacalypse.visualization.camera import Camera
 from roombacalypse.visualization.renderer import Overlays, WorldRenderer
+from roombacalypse.visualization.sound import CollisionSound
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +54,10 @@ HELP_LINES: tuple[tuple[str, str], ...] = (
     ("E", "belief: odometry (purple) and SLAM (green)"),
     ("M", "the robot's map (occupancy grid)"),
     ("P", "pose graph: keyframes and loop closures"),
+    ("C", "coverage: swept (green), still to sweep (orange)"),
     ("T", "trail"),
+    ("V", "collision sound on/off"),
+    ("K / Shift+K", "kidnap: carry the robot to the cursor / anywhere"),
     ("Left click", "place obstacle"),
     ("O", "cycle obstacle type"),
     ("X", "remove obstacle under cursor"),
@@ -77,6 +83,7 @@ class Viewer:
     ) -> None:
         if offscreen:
             os.environ["SDL_VIDEODRIVER"] = "dummy"
+            os.environ["SDL_AUDIODRIVER"] = "dummy"  # sounds "play" silently, and no device is needed
         pygame.init()
         pygame.display.set_caption("ROOMBACALYPSE")
         self.screen = pygame.display.set_mode((config.width, config.height))
@@ -89,6 +96,8 @@ class Viewer:
         self.camera = self._fit_camera()
         self.renderer = WorldRenderer(sim.spec)
         self.fonts = hud.Fonts()
+        self.sound = CollisionSound(config.collision_sound, config.sound_volume, config.sound_cooldown)
+        self._event_cursor = 0
 
         self.speed_index = min(range(len(SPEED_STEPS)), key=lambda i: abs(SPEED_STEPS[i] - config.speed_factor))
         self.paused = False
@@ -100,6 +109,7 @@ class Viewer:
         self.show_belief = False
         self.show_map = True
         self.show_graph = False
+        self.show_coverage = False
         self.template_index = 0
         self.trail: deque[Point] = deque(maxlen=max(2, int(config.trail_seconds / TRAIL_SAMPLE_PERIOD)))
         self.coverage = self._new_coverage()
@@ -167,6 +177,7 @@ class Viewer:
             if self._step_once:
                 self._step()
                 self._step_once = False
+                self._listen()
             return
         self._accumulator += min(frame_seconds, 0.1) * self.speed
         steps = 0
@@ -180,6 +191,13 @@ class Viewer:
         if frame_seconds > 0.0:
             achieved = steps * sim.dt / frame_seconds
             self._achieved_speed += 0.1 * (achieved - self._achieved_speed)
+        self._listen()
+
+    def _listen(self) -> None:
+        """Play the collision sound if the simulator reported a new contact since the last frame."""
+        events, self._event_cursor = self.sim.events.since(self._event_cursor)
+        if any(event.kind is EventKind.COLLISION for event in events):
+            self.sound.play(self._clock_seconds)
 
     def _step(self) -> None:
         self.sim.step()
@@ -194,6 +212,7 @@ class Viewer:
 
     def _reset(self, seed: int | None = None) -> None:
         self.sim.reset(seed)
+        self._event_cursor = 0
         self.trail.clear()
         self.coverage = self._new_coverage()
         self._last_trail_time = -1.0
@@ -263,10 +282,19 @@ class Viewer:
                 self.toast("Purple: dead reckoning. Green: SLAM.")
         elif key == pygame.K_t:
             self.show_trail = not self.show_trail
+        elif key == pygame.K_v:
+            if not self.sound.available:
+                self.toast("No collision sound: start with --sound FILE (or --sound bonk).")
+            else:
+                self.toast("Collision sound on." if self.sound.toggle() else "Collision sound off.")
         elif key == pygame.K_m:
             self.show_map = not self.show_map
             if self.show_map:
                 self.toast("Blue: the robot's own map, drawn where it really is.")
+        elif key == pygame.K_c:
+            self.show_coverage = not self.show_coverage
+            if self.show_coverage:
+                self.toast("Green: floor the robot believes it swept. Orange: where it still wants to go.")
         elif key == pygame.K_p:
             self.show_graph = not self.show_graph
             if self.show_graph:
@@ -276,6 +304,8 @@ class Viewer:
             self.toast(f"Placing: {PLACEABLE[self.template_index].description}")
         elif key == pygame.K_x:
             self._remove_at(pygame.mouse.get_pos())
+        elif key == pygame.K_k:
+            self._kidnap(None if shift else pygame.mouse.get_pos())
         elif key in (pygame.K_h, pygame.K_F1):
             self.show_help = not self.show_help
         elif key == pygame.K_0:
@@ -290,6 +320,21 @@ class Viewer:
         x, y = self.camera.to_world(*screen_pos)
         result = self.sim.place_obstacle(template, x, y)
         self.toast(f"Placed {template.label}" if result.ok else f"Can't place {template.label}: {result.reason}")
+
+    def _kidnap(self, screen_pos: tuple[int, int] | None) -> None:
+        """Pick the robot up and put it down at the cursor (if there is room) or somewhere random."""
+        pose = None
+        if screen_pos is not None:
+            if not self.world_rect.collidepoint(screen_pos):
+                return
+            x, y = self.camera.to_world(*screen_pos)
+            here = Circle(x, y, self.sim.spec.radius + 0.02)
+            if not self.sim.world.is_shape_free(here, 0.0, self.sim.spec.height):
+                self.toast("No room for the robot there.")
+                return
+            pose = Pose2D(x, y, self.sim.robot.pose.theta)
+        self.sim.kidnap(pose)
+        self.toast("Kidnapped! The robot was not told. Watch it work out where it is.")
 
     def _remove_at(self, screen_pos: tuple[int, int]) -> None:
         if not self.world_rect.collidepoint(screen_pos):
@@ -309,8 +354,15 @@ class Viewer:
             layers.scan, layers.scan_pose = self.sim.last_scan, self.sim.last_scan_pose
         autonomous = self.brain.mode is Mode.AUTONOMOUS
         if self.show_nav and autonomous:
-            layers.plan = self.brain.wander.plan
-            goal = self.brain.wander.goal
+            behaviour = self.brain.behaviour
+            layers.plan = behaviour.plan
+            goal = behaviour.goal
+            path = getattr(behaviour, "follower", None)
+            if path is not None and path.path:
+                # Like the goal, the path is drawn relative to the robot (where it is heading, not where it is).
+                here = self.brain.pose
+                truth = self.sim.robot.pose
+                layers.path = [truth.transform_point(*here.inverse_transform_point(*p)) for p in path.path]
             if goal is not None:
                 # The goal lives in the map frame. Draw it *relative to the robot*, like the DWA
                 # arcs, so it shows where the robot is actually heading; belief errors show on the E layer.
@@ -322,10 +374,18 @@ class Viewer:
             layers.slam_belief = self.sim.boot_pose.compose(self.brain.pose)
         if self.show_map:
             layers.grid, layers.map_pose = self._map_grid(), self.sim.boot_pose
+        coverage = getattr(self.brain.behaviour, "coverage", None)
+        if self.show_coverage and coverage is not None:
+            rgba = np.zeros((*coverage.costmap.shape, 4), dtype=np.uint8)
+            swept = self.brain.executive.memory.aligned(coverage.costmap)
+            rgba[swept] = palette.COVERED
+            rgba[coverage.useful] = palette.TO_COVER
+            layers.coverage = (rgba, coverage.costmap.origin, coverage.costmap.resolution, id(coverage))
+            layers.map_pose = self.sim.boot_pose
         if self.show_graph and slam.keyframes:
             nodes = slam.node_poses()
             layers.graph_nodes = transform_points(self.sim.boot_pose, nodes[:, :2])
-            layers.graph_loops = [(e.i, e.j) for e in slam.graph.edges() if e.kind == "loop"]
+            layers.graph_loops = [(e.i, e.j) for e in slam.graph.edges() if e.kind in ("loop", "relocalization")]
         return layers
 
     def _map_grid(self) -> OccupancyGrid:
@@ -359,7 +419,7 @@ class Viewer:
             hover=hover, ghost=ghost, overlays=self._overlays(),
         )
         toggles = (("lidar", self.show_lidar), ("nav", self.show_nav), ("belief", self.show_belief),
-                   ("map", self.show_map), ("graph", self.show_graph))
+                   ("map", self.show_map), ("graph", self.show_graph), ("coverage", self.show_coverage))
         layers = " · ".join(name for name, on in toggles if on)
         ui = hud.UiState(
             speed=self.speed,

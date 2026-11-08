@@ -1,6 +1,6 @@
 # ROOMBACALYPSE architecture
 
-> **Status:** living document, revised at every milestone. **Milestones 1–3
+> **Status:** living document, revised at every milestone. **Milestones 1–4
 > are implemented**; sections about later milestones describe the *intended*
 > design and are marked **(planned, Mx)**. They will be rewritten from the
 > actual implementation when that milestone is built and tested.
@@ -80,16 +80,18 @@ roombacalypse/
 │                             events, Controller protocol, config, RNG streams, paths
 ├── environment/    truth     shapes, World (outline, obstacles, dock), room files, placeable catalog
 ├── robot/          truth     drivetrain (motor limits), wheel/ground error model, body state
-├── sensors/        truth     LiDAR (ray casting + noise), bumper, wheel encoders      [M2]
+├── sensors/        truth     LiDAR (ray casting + noise), bumper, wheel encoders [M2], gyro [M4]
 │                             (M5) battery gauge, dirt sensor, dock beacon
 ├── simulation/     truth     clock, contact solver, Simulation engine
 ├── cleaning/       truth     (M5) dirt field, vacuum pickup, cleaning metrics
 ├── battery/        truth     (M5) battery cell and power model
 ├── mapping/        belief    occupancy grid, surface fields, pose-graph optimiser [M3]
-├── localization/   belief    wheel odometry [M2]; scan matching, graph SLAM [M3]
-├── planning/       belief    (M4) costmap, A*, coverage planner
-├── navigation/     belief    obstacle memory, DWA local planner [M2]; (M4) path following; (M5) docking
-├── autonomy/       belief    RobotBrain, teleop, wander behaviour [M2]; (M4) executive, recovery
+├── localization/   belief    wheel odometry [M2]; scan matching, graph SLAM [M3]; gyrodometry,
+│                             global relocalisation [M4]
+├── planning/       belief    costmap, A*, coverage planner [M4]
+├── navigation/     belief    obstacle memory, DWA local planner [M2]; path following [M4]; (M5) docking
+├── autonomy/       belief    RobotBrain, teleop, wander behaviour [M2]; executive, stuck detection,
+│                             recovery ladder [M4]
 ├── personality/    observer  (M6) emotions, appraisal, narrator, incident reports
 ├── evaluation/     harness   ground-truth metrics, footprint coverage, headless scenarios [M2]
 ├── visualization/  harness   pygame viewer (the only pygame importer)
@@ -222,6 +224,7 @@ Details: [`algorithms/differential-drive.md`](algorithms/differential-drive.md),
 | LiDAR | ✅ M2 | 2D ray cast at 0.095 m against walls and obstacles whose band contains that height; NumPy-vectorized ray–segment and ray–circle intersection | 5 Hz | 1° resolution, 6 m range; σ = 8 mm + 0.4 % of range; 1 % dropouts; sweep is instantaneous |
 | Bumper | ✅ M2 | front 180° arc, left/right switches, both within ±15°; latched between control ticks | every step | no rear bumper |
 | Wheel encoders | ✅ M2 | 508.8 ticks per revolution, counting wheel rotation | every control tick | quantization; true calibration error and slip happen upstream |
+| Gyroscope | ✅ M4 | MEMS yaw-rate gyro measuring the true body rate after collisions, integrated into an angle | every step (read at 10 Hz) | scale error σ 0.3 %, bias σ 0.5 °/s plus a random walk, 0.01 °/s/√Hz noise, quantization |
 | Battery gauge | planned M5 | state of charge and voltage | 1 Hz | noise, 1 % quantization |
 | Dirt sensor | planned M5 | acoustic debris detector: Poisson count of particles picked up | every step | detects only what is under the robot |
 | Dock beacon | planned M5 | infrared bearing to the dock inside a cone, with line of sight | 10 Hz | bearing noise |
@@ -257,13 +260,21 @@ machine on top of DWA:
 
 See [`algorithms/dwa.md`](algorithms/dwa.md).
 
-**(planned, M4)** The executive state machine replaces "wander":
+**M4 behaviour: the coverage executive** (`autonomy/executive.py`, the
+default; `autonomy.behaviour = "wander"` brings M2's back). A state machine
+over the coverage planner, the path follower and DWA:
 
 ```
-DOCKED/CHARGING → UNDOCKING → CLEANING { EXPLORE | COVER | SPOT_CLEAN }
-CLEANING → RETURNING → DOCKING → CHARGING → RESUMING → CLEANING … → DONE
-any state → RECOVERING → back to previous state | TRAPPED
-any state ⇄ MANUAL (user override)
+WAIT (scan, gyro calibration) → UNDOCK → DRIVE ⇄ BACK OFF / TURN (bump reflex)
+DRIVE → RECOVER (stuck: back up · spin · hop · elsewhere) → DRIVE | TRAPPED
+any state → LOST (SLAM lost: stand still, hop for a new view) → DRIVE when found
+DRIVE → DONE (no uncovered floor, no frontier)
+```
+
+M5 adds the energy-aware return to the dock and docking:
+
+```
+DOCKED/CHARGING → UNDOCK → CLEANING → RETURNING → DOCKING → CHARGING → RESUMING …
 ```
 
 ### 10.2 Mapping and localization (implemented, M3; decision D7)
@@ -287,20 +298,32 @@ derivations and measured results: [`algorithms/slam.md`](algorithms/slam.md).
 - **Evaluation.** Online and keyframe trajectory error against ground truth
   through the boot pose (no alignment; the aligned ATE is reported too), and
   map precision/recall against the true scan-plane geometry.
-- **Not done:** global relocalisation (a kidnapped robot stays lost), submaps
-  for very long sessions, persistent maps.
+- **Lost and found (M4).** Three scans in a row that fit nowhere near the
+  prediction: the robot declares itself lost (kidnapped). It then searches the
+  whole occupancy grid for each new view (branch-and-bound correlative search,
+  as in Cartographer), accepts only a strong, unambiguous match, and joins it
+  to the graph with a relocalisation constraint.
+- **Not done:** submaps for very long sessions, persistent maps, multi-session
+  mapping (a robot set down somewhere unmapped stays lost until it sees a
+  mapped place).
 
-### 10.3 Planning (planned, M4)
+### 10.3 Planning (implemented, M4)
 
-- **Costmap:** occupied cells are inflated by robot radius plus a safety margin
-  (lethal). Beyond that, cost decays exponentially, which keeps paths away from
-  furniture. Unknown cells are untraversable except as frontier targets.
-- **A\*:** 8-connected grid, octile heuristic, no corner cutting, cost-weighted.
-  Paths are pruned by line-of-sight on the costmap.
-- **Coverage:** online boustrophedon motion with A\* backtracking (BA\*,
-  Viet et al., 2013) on a coarse coverage grid sized to the cleaning width.
-  When no reachable uncovered cell remains, frontier exploration takes over
-  (Yamauchi, 1997).
+Full write-up and measured results: [`algorithms/planning.md`](algorithms/planning.md).
+
+- **Costmap** from the SLAM grid every second: occupied cells and remembered
+  bumps, inflated by robot radius plus DWA's safety margin (lethal), strips
+  of passable cells one cell wide made lethal too (dead ends the robot fits
+  by less than the map's resolution), cost decaying exponentially beyond,
+  unknown cells passable at a premium.
+- **A\*:** 8-connected grid, octile heuristic, no corner cutting, cost-weighted,
+  tested optimal against Dijkstra. Coverage uses SciPy Dijkstra *fields* (one
+  start, every cell). Paths are pruned by line of sight.
+- **Coverage:** online BA\* (Viet et al., 2013): boustrophedon lanes along map
+  x, shifts of one lane width, backtracking to the nearest rich uncovered
+  area by path, leftover fringes last; frontier exploration (Yamauchi, 1997)
+  when nothing uncovered is reachable; done when neither remains. "Stranded"
+  (nowhere to plan from) is trouble, not done.
 
 ### 10.4 Navigation
 
@@ -316,30 +339,32 @@ derivations and measured results: [`algorithms/slam.md`](algorithms/slam.md).
   Closed-loop tests with the real simulator show it detouring around obstacles
   and stopping at walls without contact. Two versions of the cost function
   were rejected because those tests failed; see the algorithm note.
-- **(planned, M4)** lookahead points along the A\* path become DWA's goal.
+- **Path following (implemented, M4):** a point `lookahead` (0.5 m) along the
+  path beyond the robot's projection on it becomes DWA's goal (pure pursuit),
+  with a speed cap near the path's end and near obstacles.
 - **(planned, M5)** docking: plan to a pre-dock pose in the map frame, then
   servo on the infrared beacon's bearing for the final approach.
 
-### 10.5 Recovery (planned, M4)
+### 10.5 Recovery (implemented, M4)
 
-Independent, testable detectors:
+Independent, separately tested detectors (`autonomy/recovery.py`): cornered
+(no admissible DWA arc for 1.5 s), no progress along the path, bump storm,
+oscillation, wheel slip (odometry moves, the map pose does not), plus
+"stranded" from the planner.
 
-- bump rate: N bumps within T seconds;
-- no progress: displacement below d over T seconds while motion is commanded;
-- navigation loops: revisiting the same cells, or the sign of ω flipping repeatedly;
-- plan failure: no path to any target;
-- wheel slip: encoders say moving, LiDAR scan matching says not.
+The ladder escalates while trouble recurs at the same place (0.5 m, 45 s)
+and restarts on arrival or 1 m away:
 
-Escalating strategies:
+1. back up 15 cm, if the LiDAR shows the rear is clear;
+2. spin 360° to re-scan;
+3. hop: drive on a heading towards the most open direction, checking only
+   the bare body (Nav2's DriveOnHeading), for gaps the safety margin cannot
+   get out of;
+4. give the target up and keep out of the spot for 15 minutes;
+5. `TRAPPED`: stop and call for help (unless a hop is still possible).
 
-1. replan with the goal blacklisted;
-2. back up, if the LiDAR shows the rear is clear;
-3. rotate 360° to re-scan and re-localize;
-4. escape manoeuvre;
-5. give up: enter `TRAPPED` and call for help.
-
-M2's wander behaviour already has goal stall, timeout and blocked detection,
-plus the bump reflex.
+Relocalisation is not a rung: SLAM handles it by itself (§10.2), and the
+executive's LOST state only stands still and hops for new views.
 
 ### 10.6 Energy management (planned, M5)
 
@@ -389,13 +414,18 @@ safety factor, plus a reserve. There is no fixed battery-percentage threshold.
     one where SLAM thinks it is;
   - M: the robot's occupancy grid, drawn through the true boot pose, so map
     errors show as they are (on by default);
-  - P: the pose graph, keyframes and (yellow) loop closures;
+  - P: the pose graph, keyframes and (yellow) loop closures and relocalisations;
+  - C: coverage, the floor the robot believes it swept (green) and what it
+    still wants (orange), drawn through the true boot pose (M4);
+  - G also shows the planned path (M4);
   - T: the ground-truth trail.
 - **Layering follows height:** floor, then collidable obstacles, then the
   robot, then translucent overhead obstacles, then the overlays.
 - **Controls:** Tab (manual/autonomous), pause, single step, speed
   0.125×–64×, reset, obstacle placement and removal with a preview, zoom/pan,
-  tooltips, help, screenshots.
+  tooltips, help, screenshots; K kidnaps the robot (to the cursor, or with
+  Shift anywhere); V toggles the collision sound (M4: a built-in "bonk", or any
+  WAV/OGG given with `--sound`).
 - **Offscreen use:** `--screenshot` renders through SDL's dummy driver (used by
   tests); `--headless` skips rendering entirely and prints a scorecard.
 
@@ -444,8 +474,17 @@ safety factor, plus a reserve. There is no fixed battery-percentage threshold.
   - coverage floors.
 
   M3 adds SLAM pose error (online RMS and maximum, keyframe ATE) and map
-  precision and recall. Thresholds rather than golden numbers, set from
-  measured runs with margin.
+  precision and recall. These runs use M2's wander behaviour, so the M2 and M3
+  criteria keep meaning what they meant. M4 adds 30 simulated minutes of the
+  coverage executive × 5 seeds × 3 rooms: coverage of the accessible floor,
+  no penetration, zero visible contacts, the M3 SLAM criteria, and "done" (not
+  trapped) where the room allows. Thresholds rather than golden numbers, set
+  from measured runs with margin.
+- **M4 closed-loop tests:** room coverage end to end, a crate pen (trapped or
+  done, never a collision), every stuck detector on its own trouble, the
+  escape hop in a noisy 40 cm gap, the global search against brute force, a
+  symmetric room reported ambiguous, and a kidnapped robot noticing, finding
+  itself and carrying on.
 - **(planned, M7) Benchmarks:** seeds × rooms with matplotlib plots.
 
 ## 16. Decision log
@@ -460,7 +499,7 @@ safety factor, plus a reserve. There is no fixed battery-percentage threshold.
 | D6 | Purpose-built contact solver: circle robot, projection, quasi-static pushing | pymunk / Box2D | slow robots, determinism, explainability, no dependency | medium |
 | D7 | ✅ Graph SLAM: scan-matching front end, pose graph with loop closure (Karto / slam_toolbox / Cartographer family). Chosen by the agent; the director delegated it ("something that works in actual robotics") | MCL against the self-built map (the M2 recommendation); Rao-Blackwellized particle filter (GMapping) | can correct mapped errors; what real LiDAR robots run; scales to the multi-room apartment | medium: behind the `Slam` protocol |
 | D8 | ✅ DWA local planner, window sampled in wheel space, ramp-aware prediction | vector field histogram; pure pursuit with a safety stop | honours velocity and acceleration limits natively; reused in M4 | low |
-| D9 | (M4) BA\* plus frontier exploration for coverage | cellular decomposition on a known map; spanning-tree coverage | works online while the map is still being built | medium |
+| D9 | ✅ (M4) Online BA\* plus frontier exploration for coverage, re-assessed on the growing SLAM map | cellular decomposition on a known map; spanning-tree coverage | works online while the map is still being built | medium |
 | D10 | (M5) Dirt as a density grid | individual particles | scales, simple pickup math, still renders as particles | low |
 | D11 | (M6) Personality is an observer only | personality biasing behaviour | the brief requires separation; keeps robotics testable | low |
 | D12 | `pygame-ce` instead of upstream `pygame` | upstream `pygame` | upstream has no wheels for Python ≥ 3.14; same API | low |
@@ -471,6 +510,10 @@ safety factor, plus a reserve. There is no fixed battery-percentage threshold.
 | D17 | ✅ `map → odom` split: SLAM corrects odometry; goals live in the map frame, reflexes and obstacle memory in the odometry frame | everything in one frame | the map frame jumps at loop closures; local control must not | low |
 | D18 | ✅ Scan matching by point-to-line ICP on fitted surface elements, correspondences from a distance-transform feature map; correlative search only for the mode | likelihood-field Gauss-Newton (Hector, Cartographer); NDT | measured: the likelihood field limited a match to ±1 cell and drifted in heading | low |
 | D19 | ✅ Map precision counts phantom obstacles in free space; thickening into solid matter is allowed up to 3 cells; the strict number is reported too | precision within one cell of a surface | every occupancy grid thickens surfaces into solid matter, where beams cannot clear it; that is harmless | low |
+| D20 | ✅ (M4) A MEMS gyro; heading from the gyro, distance from the wheels (gyrodometry), bias calibrated on the dock and at every standstill | wheels only; an EKF fusing both | the director said yes; what every robot vacuum does; substitution is simple and measured 5–10× less dead-reckoning drift | low |
+| D21 | ✅ (M4) The coverage executive is the default behaviour; M2's wander stays selectable and keeps the M2/M3 acceptance runs meaningful | replace wander | the old acceptance numbers stay comparable; wander is a useful baseline | low |
+| D22 | ✅ (M4) Global relocalisation inside SLAM (branch-and-bound correlative search on the occupancy grid, accepted only when unambiguous), not in the recovery ladder | Monte Carlo localisation with uniform re-seeding; a rung "rotate and re-localise" | exact optimum, cheap with branch and bound, no particles; the robot cannot know a kidnapping happened, so detection belongs where the scans are | low: one module |
+| D23 | ✅ (M4) The collision sound ships as a synthesised "bonk"; any clip can be played from a local file (`--sound`), git-ignored under `sounds/` | bundling a well-known cartoon scream | copyrighted audio cannot go into an MIT repository | low |
 
 ### D7 in more detail
 

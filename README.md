@@ -8,17 +8,21 @@ is ridiculous; the engineering is meant to be real. The robot will have to map
 its world, find itself in it, plan, clean, and get itself home, without ever
 peeking at the simulator's ground truth.
 
-> **Status: Milestone 3 of 7 ("It knows where it is").** Press Tab and the
-> robot drives itself. It explores using only its simulated LiDAR, bumper and
-> wheel encoders, and builds a map as it goes. It also knows where it is in
-> that map: graph SLAM with scan matching and loop closure keeps it within
-> about a centimetre of the truth, while its wheel odometry drifts by metres.
-> Planning, cleaning, battery and personality are *designed*
+> **Status: Milestone 4 of 7 ("It has a plan").** Press Tab and the robot
+> cleans methodically: boustrophedon lanes planned on the map it is still
+> building, backtracking to whatever it missed, exploring frontiers, and
+> stopping when the job is done. It uses only its simulated LiDAR, bumper,
+> wheel encoders and gyro. Graph SLAM keeps it within about a centimetre of
+> the truth. It notices when it is stuck and works its way out, and when you
+> pick it up and put it down somewhere else (K), it notices that too and
+> finds itself on its map. Cleaning, battery and personality are *designed*
 > ([docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)) but not built yet. Every
 > feature below is marked ✅ implemented or 🗓 planned; nothing is claimed
 > before it is tested.
 
-![Milestone 3: the robot's own map (blue), its pose graph with loop closures (yellow), and where SLAM (green) and odometry (purple) think it is, in the multi-room apartment](docs/images/m3-slam.png)
+![Milestone 4: twelve minutes into a clean of the studio. Pale cyan is floor the robot believes it swept, tan is what it still wants; the blue line is its true track, lanes and all; the blue outlines are its own map](docs/images/m4-coverage.png)
+
+![A kidnapping, 1.2 s later: carried 5.1 m without being told, the robot noticed its scans no longer fitted, searched its whole map and found itself (the yellow line in the pose graph). Its wheels and gyro, the purple ghost, still believe it is where it was picked up](docs/images/m4-kidnap.png)
 
 ## Features
 
@@ -41,7 +45,11 @@ peeking at the simulator's ground truth.
 | Log-odds occupancy grid map, drawn where it really is so map errors show | ✅ M3 |
 | A multi-room apartment: six spaces off a 10 m hallway, with a loop | ✅ M3 |
 | Ground-truth scoring of localization and mapping (trajectory error, map precision/recall) | ✅ M3 |
-| A\* path planning, coverage planning, stuck detection and recovery | 🗓 M4 |
+| MEMS gyroscope and gyrodometry: 5–10× less dead-reckoning drift | ✅ M4 |
+| Costmap and A\* on the robot's own map; online BA\* coverage with frontier exploration | ✅ M4 |
+| Stuck detection (cornered, no progress, bump storm, oscillation, wheel slip) and an escalating recovery ladder | ✅ M4 |
+| The kidnapped robot: it notices it was moved and relocalises by searching its whole map | ✅ M4 |
+| Optional collision sound: a built-in "bonk", or any clip of your own | ✅ M4 |
 | Dirt, vacuum, battery, energy-aware return to dock, docking, recharge and resume | 🗓 M5 |
 | Personality (frustration, confidence, curiosity, battery anxiety), incident reports | 🗓 M6 |
 | Benchmarks and release | 🗓 M7 |
@@ -81,6 +89,9 @@ python main.py                        # the studio apartment; press Tab to let t
 python main.py --mode auto            # start autonomous
 python main.py --room test_chamber    # a small empty box
 python main.py --room apartment       # six rooms off a hallway: the SLAM stress test
+python main.py --sound bonk           # a sound whenever the robot hits something (V toggles it)
+python main.py --sound sounds/my_clip.wav   # ...or your own clip (keep it out of git: sounds/ is ignored)
+python main.py --set autonomy.behaviour=wander   # M2's map-free wandering instead of coverage
 python main.py --list-rooms
 python main.py --seed 7 --set dwa.max_speed=0.2 --set lidar.dropout_probability=0.1
 python main.py --config my_settings.toml
@@ -95,18 +106,21 @@ python main.py --screenshot out/frame.png --frames 60 --mode auto   # render off
 A headless scorecard looks like this (studio, seed 3, actual output):
 
 ```
-coverage        72.4 % of 34.9 m² accessible floor
-bumps           6 (0.60/min); simulator saw 5 contacts, 0 with things the LiDAR can see
+coverage        67.1 % of 34.9 m² accessible floor
+bumps           3 (0.30/min); simulator saw 3 contacts, 0 with things the LiDAR can see
 penetration     none
-odometry drift  4.35 m, 112.9° after 600 s
-SLAM pose error 0.7 cm RMS, 1.9 cm max; heading 0.39° RMS, 1.7° max
-SLAM keyframes  856, ATE 0.7 cm RMS (0.5 cm aligned); 68 loop closures in 69 attempts
-map             precision 100.0 % (surface only 75.5 %), recall 92.0 %, 1650 occupied cells
+odometry drift  0.20 m, 7.3° after 600 s
+SLAM pose error 0.7 cm RMS, 2.4 cm max; heading 0.13° RMS, 0.5° max
+SLAM keyframes  811, ATE 0.7 cm RMS (0.5 cm aligned); 48 loop closures in 50 attempts, 0 relocalisations
+map             precision 99.7 % (surface only 75.5 %), recall 90.0 %, 1593 occupied cells
+behaviour       135 goals, 0 abandoned, 3 bump escapes; drive
 ```
 
-The odometry line is what the robot's wheels alone would believe: metres off
-after ten minutes. The SLAM lines are where it actually believed it was, and
-how good its map is, scored against ground truth the robot never sees.
+The odometry line is what the robot's wheels and gyro alone would believe
+(without the gyro: metres off after ten minutes). The SLAM lines are where it
+actually believed it was, and how good its map is, scored against ground
+truth the robot never sees. Ten minutes is a third of a studio clean: with
+`--duration 1800` the same robot reaches 92 % and reports itself done.
 
 ## Controls
 
@@ -119,10 +133,13 @@ how good its map is, scored against ground truth the robot never sees.
 | `+` / `-` | faster / slower simulation |
 | R / Shift+R | reset (same seed / next seed) |
 | L | LiDAR rays and hits |
-| G | navigation: exploration goal, DWA candidate arcs, chosen arc |
+| G | navigation: the planned path, its goal, DWA candidate arcs, chosen arc |
 | E | belief: where odometry (purple) and SLAM (green) *think* the robot is |
 | M | the robot's map (on by default), drawn through its true boot pose so errors show |
 | P | pose graph: keyframes (green) and loop closures (yellow) |
+| C | coverage: floor the robot believes it swept (green), what it still wants (orange) |
+| K / Shift+K | kidnap: carry the robot to the cursor / somewhere random (it is not told) |
+| V | collision sound on/off (start with `--sound bonk` or `--sound FILE`) |
 | T | ground-truth trail |
 | Left click | place an obstacle (preview follows the mouse) |
 | O | cycle obstacle type: cardboard box, pillar, sock, ottoman |
@@ -139,12 +156,24 @@ Amber outlines mark movable objects. Translucent furniture is overhead: the
 robot can drive underneath, and its LiDAR sees straight through it.
 
 Try dropping a sock (O, then click) in front of the autonomous robot. The
-LiDAR can't see it, so the robot bumps, backs off and remembers it for 20 s.
+LiDAR can't see it, so the robot bumps, backs off, and puts it on its map.
+
+Or kidnap it (K with the mouse somewhere on the floor). Its wheels never
+turned, so nothing tells it; a fraction of a second later its scans stop
+fitting, it says it is lost, searches its whole map, and carries on cleaning
+from where it really is. Put it down in a room it has never seen and it has
+to wander until it recognises something.
 
 The panel separates what is *true* (ground truth) from what the robot
 *senses* and *believes*, and keeps a live, colour-coded event log.
 
-Planned bindings: `C` coverage (M4), right-click to spawn dirt (M5).
+Planned bindings: right-click to spawn dirt (M5).
+
+**About the sound.** The director wanted Tom's scream from *Tom and Jerry*.
+That clip is copyrighted, so it is not in this repository and never will be.
+The built-in sound is a synthesised "bonk". If you own a clip you like, put
+it in `sounds/` (git-ignored, so it stays on your machine) and start with
+`--sound sounds/your_clip.wav`, or set `viewer.collision_sound` in a config file.
 
 ## Configuration
 
@@ -161,8 +190,8 @@ annotated and shows every shape type and the `table` and `chair` macros.
 ## Tests and checks
 
 ```bash
-pytest                                                          # ~375 tests, ~30 s
-pytest -m slow                                                  # milestone acceptance runs, ~8 min
+pytest                                                          # ~470 tests, ~45 s
+pytest -m slow                                                  # milestone acceptance runs, ~27 min
 uvx ruff check roombacalypse tests                              # lint (optional tool)
 uvx mypy roombacalypse --python-executable .venv/bin/python     # type check (optional tool)
 ```
@@ -180,11 +209,21 @@ Highlights:
   wheel-base error it is ten times better than dead reckoning. It closes
   driven loops, survives wheel slip, and its map is scored against ground
   truth. The scan matcher was checked for bias against an oracle map.
-- **Acceptance suite:** 10 simulated minutes × 5 seeds × 3 rooms. It asserts no
-  penetration, zero contacts with anything the LiDAR can see, no stalls, a
-  bump-rate ceiling and a coverage floor. It also asserts SLAM pose error and
-  map precision/recall: about 1 cm RMS in the studio, 3–5 cm in the apartment,
-  measured.
+- **Planning:** A\* is checked optimal against Dijkstra on random grids; every
+  stuck detector fires on its own trouble and on nothing else; the escape hop
+  gets out of a noisy 40 cm gap; the global relocalisation search returns the
+  exhaustive optimum, finds a scan taken anywhere, facing any way, and reports
+  a symmetric room as ambiguous; a kidnapped robot notices, finds itself and
+  goes back to cleaning.
+- **Acceptance suite:**
+  - M2/M3: 10 simulated minutes of wandering × 5 seeds × 3 rooms: no
+    penetration, zero contacts with anything the LiDAR can see, no stalls,
+    bump-rate ceilings, coverage floors, SLAM pose error and map
+    precision/recall (about 1 cm RMS in the studio, 3–5 cm in the apartment);
+  - M4: 30 simulated minutes of coverage × 5 seeds × 3 rooms: at least 90 % of
+    the studio's accessible floor, the job declared done, the same safety and
+    SLAM criteria, never lost or trapped; and robots kidnapped five times per
+    run that always find themselves, within centimetres.
 
 ## Architecture overview
 
@@ -217,8 +256,8 @@ Read more:
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): full design and decision log
 - [docs/ROADMAP.md](docs/ROADMAP.md): milestones, acceptance criteria with measured results, risks
-- [docs/algorithms/](docs/algorithms/): kinematics, collisions, LiDAR, odometry and drive errors, DWA and
-  exploration, graph SLAM
+- [docs/algorithms/](docs/algorithms/): kinematics, collisions, LiDAR, odometry, gyro and drive errors, DWA
+  and exploration, graph SLAM and relocalisation, planning, coverage and recovery
 
 ### Repository layout
 
@@ -229,12 +268,13 @@ roombacalypse/
   core/                 geometry, kinematics, messages, events, config, RNG, paths
   environment/          shapes, world, room loader, placeable catalog
   robot/                drivetrain, wheel/ground error model, body state
-  sensors/              ray casting, LiDAR, bumper, encoders
+  sensors/              ray casting, LiDAR, bumper, encoders, gyro
   simulation/           clock, contact solver, engine
   mapping/              occupancy grid, surface fields, pose-graph optimizer
-  localization/         wheel odometry, scan matching, graph SLAM
-  navigation/           obstacle memory, Dynamic Window Approach
-  autonomy/             the robot's brain, teleoperation, exploration behaviour
+  localization/         wheel odometry and gyro, scan matching, graph SLAM, global relocalisation
+  planning/             costmap, A*, coverage planner
+  navigation/           obstacle memory, Dynamic Window Approach, path follower
+  autonomy/             the robot's brain, teleoperation, wander, coverage executive, stuck detection, recovery
   evaluation/           ground-truth metrics, coverage, headless scenarios
   visualization/        camera, renderer, HUD, viewer
   app.py                CLI and composition root
@@ -248,23 +288,27 @@ D1 in the architecture document.
 
 ## Current limitations
 
-Honest list as of Milestone 3:
+Honest list as of Milestone 4:
 
-- **The map is not used for planning yet.** The robot still explores at
-  random, now with a visit counter in its map frame that no longer smears.
-  Systematic coverage needs Milestone 4's planner; in the apartment, random
-  wandering reaches about half the floor in 10 minutes.
-- **SLAM has no global relocalization.** A robot picked up and put down
-  elsewhere stays lost; it notices, and keeps those scans out of its map.
-  Loop closure searches a bounded window (±0.5 m, ±12°).
-- **Absolute error grows away from the dock** across long corridors until a
-  loop closes: about 5 cm in the apartment's far office, mostly heading drift.
-  A gyroscope would bound it.
-- **Odometry drifts:** up to several metres and 100°+ per 10 minutes. That is
-  deliberate realism, and SLAM corrects it; no gyro is modelled (yet).
-- **DWA is a local planner.** It handles the obstacles tested, but U-shaped
-  traps and dead ends can still fool it; Milestone 4 adds global planning
-  and recovery.
+- **Coverage stops short of edges.** The footprint sweeps up to the safety
+  margin: strips of 3–5 cm along walls and furniture stay unswept, and gaps
+  the robot would fit by less than a map cell (35–45 cm wide dead ends) are
+  never entered. That is most of the 8–10 % of accessible floor it misses in
+  the studio. Real robots have side brushes and an edge pass (M5).
+- **Lanes run along the map's x axis.** No per-room orientation; in the
+  apartment (about 60 m² in six rooms), 30 minutes reaches about 80 %.
+- **Relocalisation needs a mapped place.** A kidnapped robot put down in a room
+  it has never seen hops around until it recognises something (it does not
+  start a second map). In a near-symmetric room it waits for a telling view.
+  A kidnapping shorter than the tracking window (25 cm) is just corrected as
+  a slip. One global search can take up to a second of computing.
+- **Absolute SLAM error grows away from the dock** across long corridors until
+  a loop closes: about 5 cm in the apartment's far office, mostly a small
+  rotation of the whole map. The map itself stays consistent (2 cm aligned).
+- **Odometry still drifts**, now 0.05–1.6 m per 10 minutes with the gyro
+  (metres without); SLAM corrects it.
+- **Recovery is local.** The ladder backs up, spins and hops; it does not plan
+  an escape route.
 - **The LiDAR sweep is instantaneous.** No motion distortion, beam divergence
   or reflectivity effects.
 - **Simplified contact physics.**
@@ -274,10 +318,10 @@ Honest list as of Milestone 3:
   - No friction, mass or momentum.
 - **No climbing.** Anything inside the robot's height band blocks it, even a
   1 cm cable; real robots climb about 1.5 cm.
-- **Your edits are not reproducible.** Interactive input is not recorded, so
-  manual sessions cannot be replayed.
-- **Coverage is approximate.** The accessible-floor estimate is computed once
-  per reset, so obstacles you place later don't update it.
+- **Your edits are not reproducible.** Interactive input (including kidnapping)
+  is not recorded, so manual sessions cannot be replayed.
+- **Coverage scoring is approximate.** The accessible-floor estimate is
+  computed once per reset, so obstacles you place later don't update it.
 - The project runs from a source checkout, which is where `config/` is found.
   Override the location with `ROOMBACALYPSE_CONFIG_DIR`.
 
@@ -288,8 +332,8 @@ Honest list as of Milestone 3:
 | ✅ | **M1: It moves** | drive a robot around a furnished room, push socks |
 | ✅ | **M2: It sees** | LiDAR rays, bump reflexes, autonomous exploration without crashing, drifting odometry |
 | ✅ | **M3: It knows where it is** | a map appearing from nothing, loops snapping shut, a multi-room apartment |
-| ⏭ | **M4: It has a plan** | planned paths, methodical coverage, escaping chair-leg traps |
-| 🗓 | **M5: It cleans and comes home** | dirt disappearing, battery anxiety, docking, resuming |
+| ✅ | **M4: It has a plan** | planned paths, methodical coverage, escaping dead ends, finding itself after a kidnapping |
+| ⏭ | **M5: It cleans and comes home** | dirt disappearing, battery anxiety, docking, resuming |
 | 🗓 | **M6: It has feelings** | frustration meters, incident reports, unsolicited commentary |
 | 🗓 | **M7: It ships** | benchmarks, plots, release |
 

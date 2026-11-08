@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import math
 
 import numpy as np
@@ -9,7 +10,7 @@ import pytest
 
 from roombacalypse.autonomy.brain import Mode, RobotBrain
 from roombacalypse.autonomy.wander import WanderBehaviour, WanderState
-from roombacalypse.core.config import AppConfig, EncoderConfig
+from roombacalypse.core.config import AppConfig, AutonomyConfig, EncoderConfig
 from roombacalypse.core.events import EventKind, EventLog
 from roombacalypse.core.geometry import Pose2D
 from roombacalypse.core.messages import BumperReading, LidarScan
@@ -96,15 +97,15 @@ def test_brain_keeps_odometry_across_mode_switches_and_reports_events() -> None:
     travelled = brain.odometry.distance
     assert travelled > 0.2
     brain.set_mode(Mode.AUTONOMOUS)
-    sim.run(5.0)
+    sim.run(6.0)  # it first stands still to calibrate its gyro (the human drove off before it could)
     assert brain.odometry.distance > travelled  # continuous, not restarted
     assert events.count(EventKind.MODE) == 1
-    assert events.count(EventKind.BEHAVIOUR) >= 1  # it chose a goal
+    assert brain.behaviour.goals_chosen >= 1  # it chose a target
 
 
 def test_invisible_sock_is_felt_then_avoided() -> None:
     sock = {"name": "sock", "kind": "clutter", "center": [1.0, 1.5], "size": [0.08, 0.6], "z": [0.0, 0.02]}
-    config = IDEAL
+    config = dataclasses.replace(IDEAL, autonomy=AutonomyConfig(behaviour="wander"))  # wander drives straight at it
     events = EventLog()
     brain = RobotBrain(config, publish=events.publisher("robot"), mode=Mode.AUTONOMOUS)
     sim = Simulation(config, box_room(width=6.0, obstacles=[sock]), brain, events=events)
@@ -120,6 +121,6 @@ def test_invisible_sock_is_felt_then_avoided() -> None:
 def test_short_autonomous_run(room_name: str) -> None:
     result = run_scenario(CONFIG, load_room(resolve_room_path(room_name)), duration=90.0, seed=1)
     assert result.min_separation > -1e-9
-    assert result.distance > 15.0
-    assert result.coverage > 0.15
+    assert result.distance > 12.0  # coverage lanes, measured 15.0-18.6 m (seeds 1-3); wander drove faster
+    assert result.coverage > 0.15  # measured 0.17-0.36
     assert result.bumps_per_minute < 3.0

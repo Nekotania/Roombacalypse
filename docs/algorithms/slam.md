@@ -175,9 +175,26 @@ corridor).
   information is the match's information plus the robot's own odometry
   noise model (3 % of distance, 3 % of rotation, 1.5°/m). The odometry part
   carries the direction the scan cannot see, for example along a corridor.
-- **Lost:** a scan fitting worse than 0.2 is not trusted. The keyframe takes
+- **Misfit:** a scan fitting worse than 0.4, or worse than 0.6 × the median
+  fit of the last 10 tracked keyframes, is not trusted. The keyframe takes
   the odometry prediction, joins the graph with an odometry-only constraint,
-  and stays out of the map and the local map. A `map` event is published.
+  and stays out of the map and the local map; every following scan is
+  matched until one fits again. (M3 used 0.2. Measured in M4 over 13 runs of
+  10–20 minutes in all rooms, tracked keyframes never fit worse than 0.53,
+  while the first scans after a kidnapping fit 0.06–0.21, *or* 0.42–0.43 in
+  the near-symmetric test chamber. A kidnapped scan at 0.21, and later one at
+  0.43, went into the map at the wrong place, and every later scan fitted the
+  corrupted local map perfectly: hence the relative test.)
+- **Innovation gate:** a match more than the tracking window (0.25 m, 8°) from
+  the prediction is a misfit too, however well it fits: odometry with a gyro
+  cannot be that wrong between two keyframes, so the match came from somewhere
+  else. Measured: in the chamber, a robot carried 0.9 m to a spot whose view
+  mirrors its old one was pulled by ICP (which converges from tens of
+  centimetres off) to that mirror image, 0.5 m and 16° from where it stood
+  still, with a fit of 0.80; only the size of the correction gave it away.
+  In normal runs the gate never fires (the scorecards are bit-identical with
+  and without it).
+- **Lost:** three misfits in a row. See "Lost and found" below.
 
 ## Back end: loop closure and the pose graph
 
@@ -208,6 +225,60 @@ Tested:
 - a drifted square closes to within 2 cm;
 - a deliberately wrong loop closure is shrugged off with the kernel
   (< 5 cm error) but drags the square more than 30 cm without it.
+
+## Lost and found: the kidnapped robot (M4)
+
+The **kidnapped robot problem** (Engelson & McDermott 1992): the robot is
+picked up and put down somewhere else (`K` in the viewer, `Simulation.kidnap`
+in tests), and nothing tells it. The wheels do not turn while it is carried,
+so odometry and the gyro report nothing; only the LiDAR sees a different
+place. (Real robot vacuums also have wheel-drop switches; this one has to work
+it out from the scans, which is the hard version.)
+
+**Detection.** After three misfits in a row, SLAM declares itself *lost*,
+stops adding keyframes, and the executive stops using the pose (see
+[planning.md](planning.md)). Measured: 0.4 s after the kidnapping, every
+time it was noticed.
+
+**Global search** (`localization/relocalization.py`). Tracking searches a few
+centimetres around the prediction; a lost robot must search the *whole* map.
+This is Cartographer's approach (Hess et al. 2016) on the occupancy grid:
+
+- The score of a pose is the mean of `exp(−d²/2σ²)` (σ = 7.5 cm) over the scan,
+  thinned to one point per 10 cm, where `d` is the distance to the nearest
+  occupied cell.
+- Candidates: every known-free cell with at least 10 cm of room, times every
+  heading at a step that moves the bulk of the scan by one cell (about 1°):
+  7–13 million poses in the apartment.
+- **Branch and bound:** blocks of 8×8 positions are bounded by a block-maximum
+  grid and expanded best bound first; once the next bound is no better than
+  the best pose found, nothing left can beat it. The result is the exact
+  optimum of the exhaustive search (tested), after scoring about 3–8 % of it.
+- **Ambiguity:** the search is repeated with the winner's neighbourhood (0.5 m,
+  20°) excluded, stopping early above 0.85 × the winner (ambiguous) and never
+  looking below 0.75 × (clearly not). Cost: 0.3–1 s per search on the
+  apartment (one search blocks one control tick), 40–70 ms in the chamber.
+
+**Acceptance.** The best pose is refined against the surface map of the 40
+nearest keyframes (correlative ±0.25 m, ±8°, then ICP). It is accepted if the
+refined fit is at least 0.6 and the ambiguity at most 0.85. It becomes a new
+keyframe, joined to the nearest old keyframe by a robust *relocalisation*
+constraint (there is no odometry to join it to the keyframes before the
+kidnapping); the correction jumps, and tracking resumes. While lost, a new
+search runs only when the view has changed (25 cm or 0.5 rad of odometry)
+or every 10 s: the same view gives the same answer, and searches are not free.
+
+**Measured** (kidnapped five times per run, every 120 s from t = 300 s, to a
+random spot on open floor; a run ends at 1000 s):
+
+| Room | Kidnappings | Noticed after | Found after | Error when found | Wrong relocalisations |
+|---|---|---|---|---|---|
+| Studio, seeds 1–3 | 15 | 0.4 s | 0.2 s (first search, every time) | 0.2–1.3 cm | 0 |
+| Apartment, seeds 1–3 | 15 | 0.4 s | 0.2 s; up to 4 min if put down in a room not yet mapped | 0.3–10 cm | 0 |
+| Test Chamber, seeds 1–8 | 40 | 0.4 s (a few landed while it was still lost) | 5–130 s: it waits, hopping, for a view the pillar and crate disambiguate | 0.1–0.9 cm | 0 |
+
+Every run ended with the robot correctly localised (final error 0.1–8.8 cm)
+and with no contact with anything the LiDAR can see.
 
 ## Evaluation (ground truth, harness only)
 
@@ -293,10 +364,13 @@ be. Each is now covered by a test or a measurement:
 
 ## Limitations
 
-- **No global relocalisation.** A robot picked up and put down elsewhere
-  ("kidnapped") stays lost. SLAM detects scans that do not fit and keeps them
-  out of the map, but never searches the whole map. That is a natural M4
-  recovery step: rotate, re-scan, search globally.
+- **Relocalisation needs a mapped place.** A robot set down in a room it has
+  never seen stays lost until it hops somewhere it has (it does not start a
+  second map and merge it later, as multi-session SLAM would).
+- **Symmetry cannot be broken.** In a near-symmetric room the robot waits for
+  a telling view; in a perfectly symmetric one it would wait forever (and ask
+  for help). A kidnapping within the tracking window (25 cm, 8°) is treated as
+  a slip and corrected, not noticed as a kidnapping.
 - **Loop closure has a window.** Drift beyond ±0.5 m and ±12° between a place
   and its revisit cannot be closed. Apartment-sized loops stay well inside it.
 - **Absolute error grows away from the dock.** It is largest after a long

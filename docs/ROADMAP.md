@@ -1,6 +1,6 @@
 # Roadmap
 
-Status as of 2026-11-05. Each milestone ends with: all tests green,
+Status as of 2026-11-07. Each milestone ends with: all tests green,
 earlier functionality re-verified, documentation updated, and a written
 report. A milestone is not "done" until its acceptance criteria are
 demonstrated by tests or recorded runs.
@@ -10,8 +10,8 @@ demonstrated by tests or recorded runs.
 | **M1** | *It moves* | room geometry, differential-drive robot, collisions, manual control, viewer | ✅ done |
 | **M2** | *It sees* | LiDAR, bumper, encoders, drive errors, DWA obstacle avoidance, autonomous exploration, headless runner, events | ✅ done |
 | **M3** | *It knows where it is* | graph SLAM (scan matching, pose graph, loop closure), occupancy grid, multi-room apartment, map/pose metrics | ✅ done |
-| **M4** | *It has a plan* | costmap, A\*, coverage planning, executive state machine, stuck detection and recovery | ⏭ next |
-| **M5** | *It cleans and comes home* | dirt and vacuum, battery and power, energy-aware return, docking, recharge and resume | planned |
+| **M4** | *It has a plan* | gyro, costmap, A\*, coverage planning, executive state machine, stuck detection and recovery, the kidnapped robot, collision sound | ✅ done |
+| **M5** | *It cleans and comes home* | dirt and vacuum, battery and power, energy-aware return, docking, recharge and resume | ⏭ next |
 | **M6** | *It has feelings* | personality system, statistics, polished visualization | planned |
 | **M7** | *It ships* | documentation, benchmarks, release preparation | planned |
 
@@ -208,34 +208,152 @@ as good as it should be. Details in algorithms/slam.md:
 
 **Limitations (honest):**
 
-- no global relocalization: a kidnapped robot stays lost;
+- no global relocalization: a kidnapped robot stays lost (resolved in M4);
 - loop closure searches ±0.5 m and ±12°;
 - absolute error grows across long corridors until a loop closes;
 - a map re-render costs about 1 ms per keyframe;
 - a static-world assumption;
 - one session (maps are not saved).
 
-## M4: It has a plan
+## M4: It has a plan ✅
 
-**Deliverables**
+Branch `milestone-4/planning` (the director asked for branches named after
+their milestone). Algorithm note: [algorithms/planning.md](algorithms/planning.md);
+the kidnapped robot is in [algorithms/slam.md](algorithms/slam.md), the gyro in
+[algorithms/odometry.md](algorithms/odometry.md).
 
-- Costmap with inflation and safety margins.
-- A\* with octile heuristic and path pruning.
-- BA\* coverage planner with frontier exploration.
-- Path following through DWA.
-- Executive state machine.
-- Stuck detectors (bump rate, no progress, loops, plan failure, slip) and an escalating recovery ladder.
-- Overlays: path (`G`), coverage (`C`).
+**Delivered**
 
-**Acceptance criteria**
+- **A gyroscope** (the director's "yes"): a MEMS yaw-rate model with scale
+  error, turn-on bias, bias random walk, angle random walk and quantization;
+  gyrodometry with bias calibration on the dock and zero-velocity updates;
+  SLAM's odometry noise model switches to it. Undocking backs straight off
+  the dock first.
+- `planning/`: a costmap from the SLAM grid (inscribed inflation, remembered
+  bumps, one-cell strips lethal, exponential cost, unknown at a premium); A\*
+  (octile, no corner cutting), SciPy Dijkstra fields, line-of-sight pruning;
+  an online **BA\*** coverage planner with rich-first backtracking and
+  **frontier exploration**.
+- `navigation/path_follower.py`: pure pursuit into DWA, with a speed cap near
+  path ends and obstacles.
+- `autonomy/executive.py`: the coverage state machine (wait, undock, drive,
+  bump reflex, recover, lost, trapped, done), now the default behaviour; M2's
+  wander remains selectable.
+- `autonomy/recovery.py`: five stuck detectors (cornered, no progress, bump
+  storm, oscillation, wheel slip) plus "stranded", and a ladder (back up,
+  spin, hop, elsewhere, trapped) that escalates only while trouble recurs in
+  the same place.
+- **The kidnapped robot** (asked for mid-milestone): `Simulation.kidnap`, the
+  `K` key; SLAM notices (three misfits in a row), searches the whole map with
+  branch and bound (`localization/relocalization.py`), accepts only an
+  unambiguous match, and resumes; the executive stands still or hops for new
+  views meanwhile.
+- **Collision sound** (asked for): `--sound bonk` (synthesised) or
+  `--sound FILE`; `V` toggles it. The *Tom and Jerry* scream the director
+  wanted is copyrighted, so it is not bundled; `sounds/` is git-ignored for
+  personal clips (D23).
+- **Viewer:** `C` coverage layer; the planned path on `G`; relocalisation edges
+  on `P`; `K` / `Shift+K` kidnap; the panel shows lost/found, and compares
+  belief with the truth *at sensing time* (it used to show up to 7° of "error"
+  that was only the 0.1 s control period while turning).
+- **Scorecard:** final behaviour state, completion time, relocalisations.
+- **Tests:** 467 fast (about 45 s), 38 slow. Ruff and mypy are clean; the fast
+  suite passes on Python 3.12 and 3.13.
 
-- A\* returns optimal costs (checked against Dijkstra on random grids) and
-  respects inflation.
-- ≥ 90 % of the accessible floor swept in the studio within 30 simulated
-  minutes, with the battery disabled. M2's random wandering reaches about 70 %
-  in 10 minutes.
-- Each stuck detector fires on its dedicated trap scenario, and the recovery
-  either succeeds or declares `TRAPPED` within bounded time.
+**Acceptance criteria and measured results.** 30 simulated minutes of the
+coverage executive, default noise, seeds 1–5 (each run is also held to the
+M3 SLAM criteria):
+
+| Criterion | Test Chamber: threshold / measured | Studio: threshold / measured | Apartment: threshold / measured |
+|---|---|---|---|
+| accessible floor swept in 30 min | ≥ 87 % / 89.6–91.8 % | **≥ 90 % / 91.8–92.4 %** | ≥ 75 % / 79.6–85.5 % |
+| job declared done | required / at 297–390 s | required / at 1468–1707 s | not required / still sweeping at 1800 s |
+| trapped or lost | never / never | never / never | never / never |
+| penetration; contacts with LiDAR-visible things | none; 0 / none; 0 | none; 0 / none; 0 | none; 0 / none; 0 |
+| bump rate | ≤ 0.2/min / 0 | ≤ 0.5/min / 0.20–0.23 | ≤ 0.6/min / 0.20–0.33 |
+| SLAM online RMS (max) | ≤ 1.5 (4) cm / 0.3–0.9 (≤ 1.4) cm | ≤ 2.5 (6) cm / 0.5–0.9 (≤ 3.1) cm | ≤ 8 (15) cm / 3.1–4.9 (≤ 11.1) cm |
+| keyframe ATE (aligned) | ≤ 1.5 (1) cm / 0.3–0.6 (0.2–0.3) cm | ≤ 3 (1.5) cm / 0.5–0.9 (0.4–0.5) cm | ≤ 8 (4) cm / 3.3–5.5 (1.7–2.9) cm |
+| map precision; recall | ≥ 98 %; ≥ 90 % / 100 %; 94.8–96.9 % | ≥ 98 %; ≥ 85 % / 99.9–100 %; 87.5–89.7 % | ≥ 93 %; **≥ 77 %** / 94.8–98.0 %; 80.4–87.1 % |
+| relocalisations without a kidnapping | 0 / 0 | 0 / 0 | 0 / 0 |
+
+- **The brief's criterion, 90 % of the studio in 30 minutes, is met** on all
+  five seeds, each finishing on its own with 24.5–28.5 minutes used. For
+  comparison, M2's random wandering reaches 83.8–85.6 % in 30 minutes (seeds 1–3), and never stops. In the
+  *first* ten minutes the two are close (wandering 72–76 %, coverage about
+  67 %): wandering sweeps the open middle quickly and then keeps re-sweeping
+  it, while lanes take longer to start paying off.
+- **Apartment recall.** Its coverage runs see more surface at grazing angles
+  (lanes along walls) and represent it less completely: recall 80.4–87.1 %,
+  below the 82 % set on wandering in M3, so the coverage runs carry their own
+  measured floor (77 %). Every other M3 number holds.
+- **A\*** is optimal against Dijkstra on 25 random grids; every stuck detector
+  fires on its own trouble and on none of the others; the crate pen ends
+  "trapped" or "done", never in a collision.
+
+**The M2 and M3 criteria still hold** (10 minutes of M2's wandering, seeds
+1–5, re-run with the gyro and every M4 change): coverage 81–86 % / 72–76 % /
+46–54 % (chamber / studio / apartment); SLAM online RMS 0.3–0.6 / 0.5–1.0 /
+2.2–5.2 cm; aligned ATE 0.2 / 0.3–0.4 / 1.6–2.0 cm; precision ≥ 96.4 %,
+recall ≥ 86.4 %; zero visible contacts; no relocalisations.
+
+**The kidnapped robot**, measured (five kidnappings per run to random open
+floor, every 120 s from t = 300 s):
+
+| Room | Kidnappings | Noticed after | Found after | Error when found | Wrong relocalisations |
+|---|---|---|---|---|---|
+| Studio, seeds 1–3 | 15 | 0.4 s | 0.2 s later (the first search, every time) | 0.2–1.3 cm | 0 |
+| Apartment, seeds 1–3 | 15 | 0.4 s | 0.2 s; up to 4 min when set down in a room not yet mapped | 0.3–10 cm | 0 |
+| Test Chamber, seeds 1–8 | 40 | 0.4 s (a few landed while it was still lost) | 5–130 s: it waits, hopping, for a view the pillar and crate disambiguate | 0.1–0.9 cm | 0 |
+
+The slow acceptance suite repeats eight of these runs (chamber and studio seeds 1–3, apartment seeds 1–2).
+
+**Gyro**, measured (10 minutes of wandering, seeds 1–5): dead reckoning
+0.05–0.42 m / 0.10–1.2 m / 0.05–1.6 m (chamber / studio / apartment), against
+0.3–3.6 / 0.7–5.2 / 0.8–11.3 m without; SLAM heading error 0.07–0.40° RMS
+(M3: 0.4–0.6°). The apartment's absolute position error barely changed (it
+is a small rotation of the whole map, not heading drift).
+
+**Found and fixed during M4** (details in planning.md and slam.md):
+
+- **Dock contact** after the gyro calibration: DWA among LiDAR points 5 mm away.
+  Both behaviours now back straight off the dock.
+- **Dithering** (113 targets in 90 s): targets inside the arrival tolerance.
+- **Meandering** over small leftovers while big areas waited: rich-first backtracking.
+- **Wall contacts** at lane ends: a speed cap on the approach.
+- **Endless corner cycling** at the end of a clean: targets still useful on
+  arrival are blacklisted.
+- **"Trapped" in an open room:** the ladder kept climbing on unrelated
+  troubles; it now resets on arrival or 1 m away.
+- **Fake frontiers** inside furniture sent the robot into tight gaps.
+- **40 cm dead ends:** every apartment "trapped" was one. One-cell strips are
+  now lethal, and the escape hop was rebuilt (5° bearings, a 2 m horizon,
+  tolerance for LiDAR noise on the walls alongside, ~1° alignment). Each
+  detail was a measured failure.
+- **"Coverage complete" with 25 m² unswept:** nowhere to plan from was taken
+  for nothing left to do (now "stranded").
+- **A dog bowl caged the robot** in its own bump memories while it spun
+  against it; the hop then checked the wrong direction.
+- **Kidnapped scans in the map:** at the M3 threshold (0.2), a kidnapped scan
+  fitting 0.21 went into the map, and every later scan fitted the corrupted
+  local map. Now 0.4, and 0.6 × the recent typical fit (0.42–0.43 in the
+  near-symmetric chamber). Then, in the chamber, ICP pulled a kidnapped
+  scan to the *mirror image* of the robot's old view (fit 0.80): an
+  innovation gate now rejects any correction beyond the tracking window.
+- **A 2-minute global search loop:** one search per second from the same
+  view; now only from new views.
+- **Wrong test expectations:** the short-run distance floor was set on
+  wandering; a synthetic "40 cm gap" was two cells wide on an ideal map; a
+  furnished 5 × 4 m box has near-twin spots. The tests now state measured
+  behaviour.
+
+**Limitations (honest):**
+
+- coverage leaves 3–5 cm strips along edges and skips 35–45 cm dead ends
+  (about 8 % of the studio's accessible floor); M5's edge pass;
+- lanes run along map x, without per-room orientation;
+- relocalisation needs a mapped place, and cannot break perfect symmetry;
+- a global search can block one control tick for up to a second;
+- recovery is local (no planned escape routes).
 
 ## M5: It cleans and comes home
 
@@ -281,19 +399,31 @@ as good as it should be. Details in algorithms/slam.md:
 
 | # | Risk | Affects | Likelihood | Mitigation / status |
 |---|---|---|---|---|
-| R1 | SLAM drift or map corruption | M3–M5 | low (measured) | graph SLAM with verified loop closures and a robust kernel; scans that do not fit stay out of the map; measured 0.3–1.6 cm ATE (studio, chamber), 2.6–5.7 cm (apartment). Remaining: heading drift across corridors (a gyro would bound it), no global relocalization |
+| R1 | SLAM drift or map corruption | M3–M5 | low (measured) | graph SLAM with verified loop closures and a robust kernel; scans that do not fit (absolutely, or relative to the recent fit) stay out of the map; a gyro since M4; measured 0.3–1.0 cm ATE (studio, chamber), 2.5–5.3 cm (apartment) |
 | R2 | Python too slow at high speed factors | all | low (measured) | M2 ran at about 50–90× real time headless; with SLAM, about 20× on the development container (SLAM costs ~15–20 s per simulated 10 minutes, profiled and vectorized) |
-| R3 | DWA local minima and oscillation | M2, M4 | medium (reduced) | M2 fixed the pillar minimum and margin deadlocks; U-traps remain; M4's A\* path and recovery ladder |
+| R3 | DWA local minima and oscillation | M2, M4 | low (measured) | M2 fixed the pillar minimum and margin deadlocks; M4 plans globally (A\*, coverage), detects five kinds of stuck and climbs a recovery ladder; no TRAPPED in the 30-minute acceptance runs |
 | R4 | Docking precision limited by localization error | M5 | medium | infrared beacon for the final approach; tolerance-based contact model |
-| R5 | Coverage near walls and under furniture limited by safety margins | M4, M5 | high (by design) | coverage measured against the *accessible* floor (implemented); later, a wall-following edge pass |
+| R5 | Coverage near walls and under furniture limited by safety margins | M4, M5 | high (by design) | coverage measured against the *accessible* floor; M4 reaches 90–92 % of it in the chamber and studio; the rest is mostly 3–5 cm strips along walls and furniture, and 35–45 cm dead ends M4 will not enter. M5: a wall-following edge pass |
 | R6 | Floating-point differences across platforms and NumPy versions | tests | low | same-process determinism tests; metric thresholds rather than golden values |
 | R7 | pygame wheel availability on new Python versions | install | low (mitigated) | `pygame-ce`; GUI isolated; core and tests run headless |
 | R8 | Scope creep in polish and personality | schedule | medium | milestone gates; personality is observer-only |
 | R9 | Movable obstacles invalidate the map | M3, M4 | medium | log-odds clamping; replanning on map change; recovery |
 | R10 | Simplified pushing (no rotation, no chain pushes) is visible to users | realism | low | documented; upgrade path in the contact solver |
 | R11 | Odometry drift makes M2's novelty memory smear in long runs | M2 | resolved (M3) | the visit counter now lives in the SLAM map frame |
-| R12 | Map re-rendering cost grows with keyframes (≈1 ms each) | M4+ | medium | lazy, throttled re-render today; Cartographer-style submaps if hour-long runs need it |
-| R13 | Kidnapping or a large slip leaves the robot lost | M4, M5 | low in simulation | lost scans are detected and kept out of the map; global relocalization belongs to M4's recovery ladder |
+| R12 | Map re-rendering cost grows with keyframes (≈1 ms each) | M4+ | medium | planners read the incremental snapshot, never forcing a re-render; 30-minute runs (≈2500 keyframes) were fine; Cartographer-style submaps if hour-long runs need it |
+| R13 | Kidnapping or a large slip leaves the robot lost | M4, M5 | low (measured) | resolved in M4: detection after three misfits (0.4 s), whole-map branch-and-bound search, accepted only when unambiguous; 70 kidnappings, no wrong relocalisation. Remaining: an unmapped drop-off point (the robot hops until it sees a mapped place) |
+| R14 | Global search time blocks a control tick (0.3–1 s on the apartment) | M4+ | low | searches only from new viewpoints while lost; the robot stands still meanwhile; a background thread or a coarser first level if maps grow |
+
+## Ideas for later (parked by the director)
+
+- **The Roomba hunts your shins.** Asked for during M4, "later on". It needs a
+  person in the simulator first: legs as moving obstacles, a cursor or a
+  scripted walker, plus detection (a pair of narrow, moving LiDAR blobs is the
+  classic leg detector). Then a behaviour that chases them, which fits
+  naturally into M6's personality as a mood ("vengeful" after being kicked or
+  kidnapped once too often), with M4's planner and DWA doing the chasing.
+  It must stay an *observer-driven option*: the personality may not steer the
+  robot (D11), so this would be an explicit behaviour mode, off by default.
 
 ## Open questions for the project director
 
@@ -302,10 +432,18 @@ as good as it should be. Details in algorithms/slam.md:
    "furniture gauntlet" for M4's recovery tests, stairs with cliff sensors)
    remain possible.
 3. ~~Licence~~: MIT, confirmed (D13).
-4. **New: a gyroscope?** Every real robot vacuum fuses one with its wheel
-   odometry, and the apartment's remaining error is mostly heading drift
-   across the hallway. Adding a simulated gyro (with bias drift) and a heading
-   constraint in the pose graph is cheap and would likely halve that error.
-   Proposed for M4 unless you prefer to keep the sensor set minimal.
-5. **New: global relocalization** (a kidnapped robot, or one switched on away
-   from its dock) fits M4's recovery ladder. Confirm it belongs there.
+4. ~~A gyroscope~~: yes (the director); added in M4. It cut dead-reckoning
+   drift 5–10×; the apartment's absolute SLAM error did not change much (a
+   small global rotation of the map, not heading drift).
+5. ~~Global relocalization~~: yes, "add the Kidnapped Robot thing"; done in
+   M4, inside SLAM rather than the recovery ladder (D22).
+6. **New: the apartment in 30 minutes.** The studio target (90 % in 30
+   minutes) is met. The apartment (about 60 m² in six rooms) reaches about 80 %
+   in 30 minutes and is still sweeping; the measured runs are in the M4
+   section. A real robot vacuum would take 60–90 minutes for that flat. Is
+   that an acceptable bar, or should M5's battery-aware missions be measured
+   on the apartment too?
+7. **New: dead ends.** Gaps the robot fits by less than a map cell (about
+   35–45 cm wide) are never entered: in the apartment it got stuck in every
+   one it tried. Real robot vacuums do enter them, bumper first. M5's edge
+   pass could try them carefully. Worth it?

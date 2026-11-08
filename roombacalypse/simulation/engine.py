@@ -10,7 +10,8 @@ Step order (every ``dt``):
 4. the wheel/ground model turns wheel rotation into true ground travel
    (calibration errors and slip); the pose is integrated exactly;
 5. the contact solver resolves collisions, possibly pushing obstacles;
-6. body state, bumper latches, collision events and the clock advance.
+6. body state, bumper latches, the gyro (which measures the *actual* yaw
+   rate), collision events and the clock advance.
 
 Deterministic: the same room, config, seed and controller give bit-identical
 runs (``tests/test_simulation.py``). Every random number comes from a named
@@ -39,11 +40,15 @@ from roombacalypse.robot.drivetrain import Drivetrain
 from roombacalypse.robot.wheels import WheelGroundModel
 from roombacalypse.sensors.bumper import Bumper
 from roombacalypse.sensors.encoders import WheelEncoders
+from roombacalypse.sensors.gyro import Gyro
 from roombacalypse.sensors.lidar import Lidar
 from roombacalypse.simulation.clock import SimClock, steps_per_period
 from roombacalypse.simulation.physics import ContactSolver
 
 logger = logging.getLogger(__name__)
+
+_KIDNAP_CLEARANCE = 0.25  # [m] a kidnapped robot is put down on open floor, this far from everything
+_KIDNAP_TRIES = 2000
 
 
 @dataclass(frozen=True)
@@ -89,8 +94,11 @@ class Simulation:
         self.lidar: Lidar
         self.bumper: Bumper
         self.encoders: WheelEncoders
+        self.gyro: Gyro | None
         self.last_scan: LidarScan | None = None
         self.last_scan_pose: Pose2D | None = None
+        self.sensed_pose: Pose2D | None = None
+        """True pose when the controller last sensed (what its belief should be compared with)."""
         self.command: DriveCommand = STOP
         self._pending_scan: LidarScan | None = None
         self._touching: frozenset[object] = frozenset()
@@ -122,8 +130,10 @@ class Simulation:
         self.lidar = Lidar(self.config.lidar, self.rng.get("sensors.lidar"))
         self.bumper = Bumper(self.config.bumper)
         self.encoders = WheelEncoders(self.spec, self.config.encoders)
+        self.gyro = Gyro(self.config.gyro, self.rng.get("sensors.gyro")) if self.config.gyro.enabled else None
         self.last_scan = None
         self.last_scan_pose = None
+        self.sensed_pose = None
         self._pending_scan = None
         self._touching = frozenset()
         self.clock.reset()
@@ -144,7 +154,8 @@ class Simulation:
 
     def sense(self) -> SensorFrame:
         """Build the frame handed to the controller; consumes the pending scan."""
-        frame = SensorFrame(self.time, self.encoders.read(self.robot), self.bumper.read(), self._pending_scan)
+        gyro = self.gyro.read() if self.gyro is not None else None
+        frame = SensorFrame(self.time, self.encoders.read(self.robot), self.bumper.read(), self._pending_scan, gyro)
         self._pending_scan = None
         return frame
 
@@ -156,6 +167,7 @@ class Simulation:
             self._pending_scan = scan
             self.last_scan, self.last_scan_pose = scan, body.pose
         if self.clock.tick % self._control_every == 0:
+            self.sensed_pose = body.pose
             self.command = self._sanitize(self.controller.update(self.sense(), self.control_period))
 
         dt = self.dt
@@ -182,6 +194,8 @@ class Simulation:
         body.travel_right += d_right
         body.contacts = result.contacts
         body.blocked = result.blocked
+        if self.gyro is not None:
+            self.gyro.observe(body.angular_velocity, dt)
         self.bumper.observe(body)
         self._record_collisions(result.contacts)
         self.clock.advance()
@@ -212,6 +226,42 @@ class Simulation:
                 self.time, "sim", EventKind.COLLISION, f"collision with {name}", obstacle=name, obstacle_id=obstacle_id
             )
         self._touching = touching
+
+    # ------------------------------------------------------------------ kidnapping
+
+    def kidnap(self, pose: Pose2D | None = None) -> Pose2D:
+        """Pick the robot up and put it down at ``pose``: the *kidnapped robot problem*.
+
+        Nothing tells the robot. Its wheels do not turn while it is carried, so
+        the encoders and the gyro carry on as if nothing happened; only the
+        LiDAR sees a different place. (Real robot vacuums also have wheel-drop
+        switches that would notice the lift; this one has to work it out.)
+        Without ``pose``, a random spot on open floor, at least
+        ``_KIDNAP_CLEARANCE`` from everything, facing anywhere. Returns the new pose.
+        """
+        if pose is None:
+            pose = self._open_floor_pose()
+        body = self.robot
+        carried = body.pose.distance_to(pose)
+        body.pose = pose
+        body.v_left = body.v_right = 0.0
+        body.linear_velocity = body.angular_velocity = 0.0
+        body.contacts = ()
+        body.blocked = False
+        self._touching = frozenset()
+        self.events.emit(self.time, "user", EventKind.KIDNAP, f"kidnapped: carried {carried:.1f} m",
+                         x=pose.x, y=pose.y, theta=pose.theta, distance=carried)
+        logger.info("kidnapped to (%.2f, %.2f, %.0f°)", pose.x, pose.y, math.degrees(pose.theta))
+        return pose
+
+    def _open_floor_pose(self) -> Pose2D:
+        rng = self.rng.get("user.kidnap")
+        box = self.world.bounds
+        for _ in range(_KIDNAP_TRIES):
+            x, y = float(rng.uniform(box.min_x, box.max_x)), float(rng.uniform(box.min_y, box.max_y))
+            if self.world.is_shape_free(Circle(x, y, self.spec.radius + _KIDNAP_CLEARANCE), 0.0, self.spec.height):
+                return Pose2D(x, y, float(rng.uniform(-math.pi, math.pi)))
+        raise RuntimeError("no open floor to put the robot down on")
 
     # ------------------------------------------------------------------ world editing
 

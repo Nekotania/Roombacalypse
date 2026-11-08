@@ -55,9 +55,15 @@ class ScenarioResult:
     keyframe_count: int
     loop_closures: int
     loop_attempts: int
+    relocalizations: int
+    """Times SLAM declared itself lost and found itself again (should be 0 unless kidnapped)."""
     goals: int
     escapes: int
     abandoned: int
+    final_state: str
+    """The behaviour's state at the end, e.g. ``"done"`` or ``"trapped"``."""
+    finished_at: float | None
+    """When the coverage behaviour declared the job complete [s] (``None``: never, or wandering)."""
     wall_time: float
     """Real seconds the run took."""
 
@@ -88,11 +94,14 @@ class ScenarioResult:
                 f"{math.degrees(self.online.max_heading):.1f}° max",
                 f"SLAM keyframes  {self.keyframe_count}, ATE {100 * self.keyframes.rms_position:.1f} cm RMS "
                 f"({100 * self.keyframes.aligned_rms_position:.1f} cm aligned); "
-                f"{self.loop_closures} loop closures in {self.loop_attempts} attempts",
+                f"{self.loop_closures} loop closures in {self.loop_attempts} attempts, "
+                f"{self.relocalizations} relocalisations",
                 f"map             precision {100 * self.map.precision:.1f} % (surface only "
                 f"{100 * self.map.surface_precision:.1f} %), recall {100 * self.map.recall:.1f} %, "
                 f"{self.map.occupied_cells} occupied cells",
-                f"behaviour       {self.goals} goals, {self.abandoned} abandoned, {self.escapes} bump escapes",
+                f"behaviour       {self.goals} goals, {self.abandoned} abandoned, {self.escapes} bump escapes; "
+                f"{self.final_state}"
+                + (f" (complete at {self.finished_at:.0f} s)" if self.finished_at is not None else ""),
             ]
         )
 
@@ -161,8 +170,11 @@ def run_scenario(
         keyframe_count=len(slam.keyframes),
         loop_closures=len(slam.loop_closures),
         loop_attempts=slam.loop_attempts,
-        goals=brain.wander.goals_chosen,
-        escapes=brain.wander.escapes,
-        abandoned=brain.wander.abandoned,
+        relocalizations=len(slam.relocalizations),
+        goals=brain.behaviour.goals_chosen,
+        escapes=brain.behaviour.escapes,
+        abandoned=brain.behaviour.abandoned,
+        final_state=brain.behaviour.state.value,
+        finished_at=brain.executive.finished_at if brain.behaviour is brain.executive else None,
         wall_time=elapsed,
     )

@@ -46,6 +46,19 @@ center_deadband_deg = 15.0 # hits within +-this of straight ahead close both swi
 [encoders]
 ticks_per_revolution = 508.8
 
+[gyro]                     # yaw-rate gyro (MEMS IMU) datasheet; each power-up draws its own hidden bias/scale
+enabled = true
+noise_density_deg = 0.01   # angle random walk [deg/sqrt(s)]
+bias_std_deg = 0.5         # turn-on bias spread [deg/s]
+bias_walk_deg = 0.0005     # bias random walk [deg/s/sqrt(s)]
+scale_error_std = 0.003    # relative scale-factor error spread
+resolution_deg = 0.0076    # rate quantisation [deg/s] (16 bit over +-250 deg/s)
+
+[odometry]                 # the robot's dead reckoning
+use_gyro = true            # heading from the gyro instead of the wheels ("gyrodometry")
+gyro_calibration_time = 3.0   # stand still this long on the dock at boot to measure the gyro bias [s]
+bias_time_constant = 20.0  # bias estimate keeps updating whenever the wheels stand still [s]
+
 [dock]
 width = 0.32               # along the wall [m]
 depth = 0.10               # into the room [m]
@@ -90,6 +103,22 @@ turn_min_deg = 60.0        # escape turn after a bump, drawn from [min, max]
 turn_max_deg = 150.0
 turn_speed = 1.5           # [rad/s]
 bump_memory_seconds = 20.0 # how long a bump location is treated as an obstacle [s]
+undock_distance = 0.3      # back straight off the dock this far before exploring [m]
+
+[autonomy]
+behaviour = "coverage"     # "coverage" (M4: plan and clean the whole map) or "wander" (M2: map-free)
+
+[planning]                 # costmap, paths and coverage (docs/algorithms/planning.md)
+extra_margin = 0.0         # planned clearance beyond body radius + DWA safety margin [m]
+cost_scale = 2.0           # extra cost per metre at the lethal boundary (open floor: 1 per metre)
+cost_decay = 0.1           # ...falling by a factor e over this distance [m]
+unknown_cost = 3.0         # extra cost per metre through never-seen cells
+bump_radius = 0.08         # remembered bumps become obstacle discs this big [m]
+lane_width = 0.25          # boustrophedon lane spacing [m] (robot is 0.34 m wide: lanes overlap)
+lookahead = 0.5            # the local planner steers for a point this far along the path [m]
+goal_tolerance = 0.12      # path / lane end reached within this distance [m]
+replan_interval = 1.0      # costmap rebuilt this often while driving [s]
+frontier_min_size = 0.25   # ignore frontiers shorter than this [m]
 
 [mapping]                  # the robot's log-odds occupancy grid (belief)
 resolution = 0.05          # cell size [m]
@@ -116,6 +145,8 @@ match_point_std = 0.01     # aligned scan points lie this far from mapped surfac
 odometry_translation_noise = 0.03  # the robot's own wheel model: std per metre [m/m]
 odometry_rotation_noise = 0.03     # heading std per radian turned [rad/rad]
 odometry_heading_drift = 0.015     # heading std per metre travelled [rad/m]
+gyro_rotation_noise = 0.005        # with the gyro: heading std per radian turned [rad/rad]
+gyro_heading_drift = 0.0005        # with the gyro: heading std per second (residual bias) [rad/s]
 loop_search_radius = 2.5   # old keyframes this close are loop-closure candidates [m]
 loop_min_travel = 5.0      # ...if at least this much travel back along the trajectory [m]
 loop_interval = 2.0        # travel between loop-closure attempts [m]
@@ -126,6 +157,12 @@ loop_min_score = 0.6       # mean likelihood a loop closure needs
 loop_max_ambiguity = 0.9   # reject if a clearly different pose scores this fraction of the best
 loop_robust_scale = 2.0    # Cauchy kernel on loop closures [standard deviations]
 optimizer_iterations = 15  # Levenberg-Marquardt iterations per pose-graph optimisation
+lost_after = 3             # keyframes in a row that fit nowhere: lost (kidnapped), search the whole map
+relocalize_interval = 1.0  # time between global searches while lost [s]
+relocalize_sigma = 0.075   # likelihood width around occupied cells in the global search [m]
+relocalize_clearance = 0.1 # only look for the robot where the map has this much room [m]
+relocalize_min_score = 0.6 # mean likelihood the refined global match needs
+relocalize_max_ambiguity = 0.85  # wait for a better view if another place scores this fraction of the best
 
 [viewer]
 width = 1280               # window size [px]
@@ -135,3 +172,6 @@ fps = 60
 speed_factor = 1.0         # initial simulation speed (x real time)
 max_steps_per_frame = 400  # physics steps per frame before dropping time
 trail_seconds = 60.0       # length of the ground-truth trail [s]
+collision_sound = ""       # when the robot hits something: "" (off), "bonk" (built in), or a WAV/OGG path
+sound_volume = 0.8         # [0, 1]
+sound_cooldown = 0.6       # minimum time between two collision sounds [s]

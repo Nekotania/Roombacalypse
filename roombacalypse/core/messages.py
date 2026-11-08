@@ -83,6 +83,18 @@ class EncoderReading:
 
 
 @dataclass(frozen=True, slots=True)
+class GyroReading:
+    """Cumulative yaw angle integrated by the IMU since power-up [rad] (not wrapped).
+
+    The IMU integrates its rate output at the physics rate, so nothing is lost
+    between control ticks; bias, noise and scale error are included. The
+    software differences successive readings, as it does with encoder counts.
+    """
+
+    angle: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
 class SensorFrame:
     """Everything the robot's software may know at one control tick.
 
@@ -96,3 +108,5 @@ class SensorFrame:
     encoders: EncoderReading = EncoderReading()
     bumper: BumperReading = BumperReading()
     lidar: LidarScan | None = None
+    gyro: GyroReading | None = None
+    """``None`` if the robot has no gyro."""

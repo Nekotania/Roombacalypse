@@ -23,3 +23,7 @@ out/
 .DS_Store
 .vscode/
 .idea/
+
+# Your own sound files (e.g. for --sound). Never committed: most clips are copyrighted.
+sounds/*
+!sounds/README.md

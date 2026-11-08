@@ -10,7 +10,8 @@ import pytest
 from roombacalypse.app import main
 from roombacalypse.autonomy.brain import Mode, RobotBrain
 from roombacalypse.core.config import AppConfig
-from roombacalypse.core.events import EventLog
+from roombacalypse.core.events import EventKind, EventLog
+from roombacalypse.core.geometry import Pose2D
 from roombacalypse.core.paths import resolve_room_path
 from roombacalypse.environment.rooms import load_room
 from roombacalypse.simulation.engine import Simulation
@@ -48,7 +49,7 @@ def test_autonomous_rendering_with_all_layers(tmp_path: Path) -> None:
         viewer.run_frames(60)  # ~16 simulated seconds
         assert sim.time > 10.0
         assert sim.robot.odometer > 1.0  # it drove itself
-        assert brain.wander.goals_chosen > 0 and sim.last_scan is not None
+        assert brain.behaviour.goals_chosen > 0 and sim.last_scan is not None
         assert viewer.coverage.fraction > 0.0
         assert len(brain.slam.keyframes) > 5 and brain.slam.grid.known_area > 5.0
         overlays = viewer._overlays()
@@ -87,20 +88,34 @@ def test_interactive_controls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
         viewer.run_frames(1)
         assert len(sim.world.obstacles) == before
 
+        # K kidnaps the robot to the cursor (only where it fits); Shift+K anywhere.
+        _post(pygame.KEYDOWN, key=pygame.K_k, mod=0)
+        viewer.run_frames(1)
+        assert sim.robot.pose.distance_to(Pose2D(6.5, 2.4, 0.0)) < 0.05
+        monkeypatch.setattr(pygame.mouse, "get_pos", lambda: sofa_px)
+        _post(pygame.KEYDOWN, key=pygame.K_k, mod=0)
+        viewer.run_frames(1)
+        assert sim.robot.pose.distance_to(Pose2D(6.5, 2.4, 0.0)) < 0.05  # no room on the sofa
+        _post(pygame.KEYDOWN, key=pygame.K_k, mod=pygame.KMOD_SHIFT)
+        viewer.run_frames(1)
+        assert sim.events.count(EventKind.KIDNAP) == 2
+        monkeypatch.setattr(pygame.mouse, "get_pos", lambda: free_px)
+
         # Keyboard: pause + single step, speed up/down, cycle tool, layers, refit, screenshot.
         tick = sim.tick
         speed_index = viewer.speed_index
-        layers = (viewer.show_lidar, viewer.show_nav, viewer.show_belief, viewer.show_map, viewer.show_graph)
+        layers = (viewer.show_lidar, viewer.show_nav, viewer.show_belief, viewer.show_map, viewer.show_graph,
+                  viewer.show_coverage)
         for key in (pygame.K_SPACE, pygame.K_n, pygame.K_EQUALS, pygame.K_MINUS, pygame.K_o, pygame.K_t,
-                    pygame.K_h, pygame.K_0, pygame.K_l, pygame.K_g, pygame.K_e, pygame.K_m, pygame.K_p, pygame.K_F12):
+                    pygame.K_h, pygame.K_0, pygame.K_l, pygame.K_g, pygame.K_e, pygame.K_m, pygame.K_p, pygame.K_c,
+                    pygame.K_F12):
             _post(pygame.KEYDOWN, key=key, mod=0)
         viewer.run_frames(1)
         assert viewer.paused and sim.tick == tick + 1
         assert viewer.speed_index == speed_index
         assert viewer.template_index == 1 and not viewer.show_trail and viewer.show_help
-        assert (viewer.show_lidar, viewer.show_nav, viewer.show_belief, viewer.show_map, viewer.show_graph) == tuple(
-            not v for v in layers
-        )
+        assert (viewer.show_lidar, viewer.show_nav, viewer.show_belief, viewer.show_map, viewer.show_graph,
+                viewer.show_coverage) == tuple(not v for v in layers)
         assert list((tmp_path / "out").glob("screenshot-*.png"))
 
         # Tab hands control to the robot and back; the robot's odometry survives the switch.

@@ -1,12 +1,13 @@
-# Wheel encoders, drive errors and dead reckoning
+# Wheel encoders, gyro, drive errors and dead reckoning
 
 Code:
 
 - truth side: `roombacalypse/robot/wheels.py` (hidden drive errors),
-  `roombacalypse/sensors/encoders.py`, `roombacalypse/sensors/bumper.py`;
+  `roombacalypse/sensors/encoders.py`, `roombacalypse/sensors/bumper.py`,
+  `roombacalypse/sensors/gyro.py` (M4);
 - belief side: `roombacalypse/localization/odometry.py`.
 
-Tests: `tests/test_sensors.py`.
+Tests: `tests/test_sensors.py`, `tests/test_gyro.py`.
 
 ## Two kinds of "metres"
 
@@ -59,6 +60,26 @@ straight ahead closes both, otherwise the switch on its side. Contacts
 behind the robot are not felt; there is no rear bumper. Switches are latched
 between control ticks so short taps are not lost.
 
+## Gyroscope (M4, asked for by the director)
+
+Every real robot vacuum carries a MEMS yaw-rate gyro. The simulated one
+measures the body's *true* yaw rate after collisions (so a robot pinned
+against a wall with spinning wheels reads no rotation) and corrupts it as a
+MEMS gyro does:
+
+    measured = (1 + s) · ω_true + b(t) + n,     n ~ N(0, ARW² / dt)
+
+| Term | Default | Meaning |
+|---|---|---|
+| `s` | σ 0.3 %, drawn per power-up | scale-factor error |
+| `b` | σ 0.5 °/s at power-up, then a random walk of 0.0005 °/s/√s | bias: why gyro headings drift |
+| `n` | 0.01 °/s/√Hz | angle random walk |
+| quantization | 0.0076 °/s | one LSB of a typical ±250 °/s, 16-bit part |
+
+The rate is integrated at the physics rate into a cumulative angle, as an
+IMU's on-board integrator does. Two random numbers are drawn per step
+whatever happens, so the stream stays comparable across scenes.
+
 ## Dead reckoning (belief side)
 
 `OdometryTracker` integrates tick differences with the *nominal* wheel radius
@@ -85,9 +106,34 @@ vacuums carry gyroscopes. The robot's software uses odometry only over short
 horizons in M2 (velocity estimates, and moving the latest scan between
 sweeps), where the drift is negligible.
 
+**Gyrodometry (M4).** With the gyro, heading changes come from the gyro and
+only the distance from the wheels. The bias is averaged while the robot
+stands on its dock for the first 3 s after boot (the autonomous behaviours
+wait for it), then nudged towards the measured rate (time constant 20 s)
+whenever the encoders say the robot is standing still again: a zero-velocity
+update, during which the heading is also held. SLAM's odometry noise model
+switches accordingly: heading std 0.5 % per radian turned plus 0.0005 rad/s,
+instead of 3 % per radian plus 1.5°/m.
+
+Measured over 10 minutes of wandering, seeds 1–5:
+
+| Room | Dead reckoning without gyro (M3) | With gyro | SLAM heading error, online RMS |
+|---|---|---|---|
+| Test Chamber | 0.3–3.6 m | 0.05–0.42 m, 2–17° | 0.07–0.19° |
+| Studio | 0.7–5.2 m | 0.10–1.2 m, 1–19° | 0.08–0.12° |
+| Apartment | 0.8–11.3 m | 0.05–1.6 m, 0.5–10° | 0.18–0.40° |
+
+The remaining heading drift is mostly the scale error (0.3 % of the thousands
+of degrees a wandering robot turns). SLAM's online heading error fell from
+0.4–0.6° (M3) to 0.07–0.40°. The apartment's absolute position error did not
+change much (3–5 cm): it is a small rotation of the whole map picked up
+across the hallway, which the gyro does not remove.
+
 ## Limitations
 
-- **No gyroscope.** Real robots fuse one with odometry; this one does not (yet).
+- **One axis, simple gyro errors.** No temperature drift, g-sensitivity or
+  cross-axis coupling; the gyro and the wheels are fused by substitution
+  (heading from one, distance from the other), not by a Kalman filter.
 - **Symmetric slip.** Slip is symmetric around zero and treats tyre
   compression and true slip alike. Real slip mostly *reduces* ground travel.
 - **Constant calibration.** Calibration errors stay fixed for a run; real
