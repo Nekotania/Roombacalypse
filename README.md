@@ -8,6 +8,8 @@ is ridiculous; the engineering is meant to be real. The robot will have to map
 its world, find itself in it, plan, clean, and get itself home, without ever
 peeking at the simulator's ground truth.
 
+A plain-language tour: [README-simplified.md](README-simplified.md).
+
 > **Status: Milestone 4 of 7 ("It has a plan").** Press Tab and the robot
 > cleans methodically: boustrophedon lanes planned on the map it is still
 > building, backtracking to whatever it missed, exploring frontiers, and
