@@ -10,7 +10,7 @@ somewhere else — notices, and finds itself again. It does all of that with
 the same kinds of sensors and maths a real robot would use. Dirt, a battery,
 and a personality are designed and not built yet.
 
-This page is the tour (and may be outdated). The [engineering README](README.md) is the manual:
+This page is the tour (and may be outdated). The [engineering README](README-Engineering.md) is the manual:
 install details, every key, every number.
 
 ![Twelve minutes into cleaning the studio. Pale cyan is floor the robot believes it has swept. Tan is floor it still wants. The blue line is where it actually drove. The blue outlines are its own map of the furniture.](docs/images/m4-coverage.png)
@@ -226,7 +226,7 @@ Keys you will actually use:
 | K | Pick it up and put it down at the cursor |
 | H or F1 | Every other key |
 
-The full list, and every command-line option, is in the [README](README.md).
+The full list, and every command-line option, is in the [README](README-Engineering.md).
 
 ## How far along it is
 
@@ -274,7 +274,7 @@ Clicks and kidnappings are not recorded.
 
 ## If you want the engineering
 
-- [README.md](README.md) — install, every control, measured numbers, layout of the code
+- [README-Engineering.md](README-Engineering.md) — install, every control, measured numbers, layout of the code
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — how the simulator and the robot are kept apart, and why each big decision went the way it did
 - [docs/ROADMAP.md](docs/ROADMAP.md) — what each milestone promised, and the measured results
 - [docs/algorithms/](docs/algorithms/) — one note per algorithm, written only after the tests passed
