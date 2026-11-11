@@ -50,10 +50,6 @@ Needs Python 3.12 or newer.
 2. Same seed, same run, every time. Even the noise is deterministic, nya.
 3. If you kidnap it, you must watch it find its way home. It's only fair.
 
-## Who made this?
-
-A catgirl named **Lily** ([@hucils](https://github.com/hucils)) who looked at a robot vacuum and thought "this needs SLAM, a gyroscope, and emotional damage."
-
 ---
 
 *made with paws, pose graphs, and one (1) bonk* 🐾 *nya~*
